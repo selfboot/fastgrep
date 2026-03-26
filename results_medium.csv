@@ -1,0 +1,91 @@
+pattern_name,pattern,tool,iteration,wall_time_ms,match_count
+literal_common,fn,rg,0,55.66,40000
+literal_common,fn,fastgrep,0,152.56,40000
+literal_common,fn,rg,1,57.56,40000
+literal_common,fn,fastgrep,1,151.71,40000
+literal_common,fn,rg,2,56.41,40000
+literal_common,fn,fastgrep,2,151.33,40000
+literal_common,fn,rg,3,56.61,40000
+literal_common,fn,fastgrep,3,150.21,40000
+literal_common,fn,rg,4,52.99,40000
+literal_common,fn,fastgrep,4,152.36,40000
+literal_rare,SPDX-License-Identifier,rg,0,53.36,10000
+literal_rare,SPDX-License-Identifier,fastgrep,0,111.31,10000
+literal_rare,SPDX-License-Identifier,rg,1,53.71,10000
+literal_rare,SPDX-License-Identifier,fastgrep,1,112.93,10000
+literal_rare,SPDX-License-Identifier,rg,2,56.96,10000
+literal_rare,SPDX-License-Identifier,fastgrep,2,111.53,10000
+literal_rare,SPDX-License-Identifier,rg,3,58.34,10000
+literal_rare,SPDX-License-Identifier,fastgrep,3,111.75,10000
+literal_rare,SPDX-License-Identifier,rg,4,53.49,10000
+literal_rare,SPDX-License-Identifier,fastgrep,4,111.96,10000
+literal_medium,HashMap,rg,0,21.07,5001
+literal_medium,HashMap,fastgrep,0,27.49,5001
+literal_medium,HashMap,rg,1,18.40,5001
+literal_medium,HashMap,fastgrep,1,26.64,5001
+literal_medium,HashMap,rg,2,19.06,5001
+literal_medium,HashMap,fastgrep,2,27.05,5001
+literal_medium,HashMap,rg,3,19.62,5001
+literal_medium,HashMap,fastgrep,3,28.32,5001
+literal_medium,HashMap,rg,4,18.67,5001
+literal_medium,HashMap,fastgrep,4,27.59,5001
+literal_pub_fn,pub fn new,rg,0,57.24,10000
+literal_pub_fn,pub fn new,fastgrep,0,112.89,10000
+literal_pub_fn,pub fn new,rg,1,51.87,10000
+literal_pub_fn,pub fn new,fastgrep,1,113.73,10000
+literal_pub_fn,pub fn new,rg,2,55.07,10000
+literal_pub_fn,pub fn new,fastgrep,2,112.85,10000
+literal_pub_fn,pub fn new,rg,3,60.21,10000
+literal_pub_fn,pub fn new,fastgrep,3,113.99,10000
+literal_pub_fn,pub fn new,rg,4,59.55,10000
+literal_pub_fn,pub fn new,fastgrep,4,114.71,10000
+regex_fn_decl,fn\s+\w+\s*\(,rg,0,55.65,40000
+regex_fn_decl,fn\s+\w+\s*\(,fastgrep,0,160.69,40000
+regex_fn_decl,fn\s+\w+\s*\(,rg,1,51.80,40000
+regex_fn_decl,fn\s+\w+\s*\(,fastgrep,1,157.41,40000
+regex_fn_decl,fn\s+\w+\s*\(,rg,2,62.01,40000
+regex_fn_decl,fn\s+\w+\s*\(,fastgrep,2,157.19,40000
+regex_fn_decl,fn\s+\w+\s*\(,rg,3,56.56,40000
+regex_fn_decl,fn\s+\w+\s*\(,fastgrep,3,160.09,40000
+regex_fn_decl,fn\s+\w+\s*\(,rg,4,57.72,40000
+regex_fn_decl,fn\s+\w+\s*\(,fastgrep,4,157.67,40000
+regex_use_stmt,use\s+\w+::\w+,rg,0,57.23,10000
+regex_use_stmt,use\s+\w+::\w+,fastgrep,0,118.36,10000
+regex_use_stmt,use\s+\w+::\w+,rg,1,55.99,10000
+regex_use_stmt,use\s+\w+::\w+,fastgrep,1,117.70,10000
+regex_use_stmt,use\s+\w+::\w+,rg,2,55.55,10000
+regex_use_stmt,use\s+\w+::\w+,fastgrep,2,121.45,10000
+regex_use_stmt,use\s+\w+::\w+,rg,3,65.93,10000
+regex_use_stmt,use\s+\w+::\w+,fastgrep,3,116.92,10000
+regex_use_stmt,use\s+\w+::\w+,rg,4,57.16,10000
+regex_use_stmt,use\s+\w+::\w+,fastgrep,4,118.12,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,rg,0,58.14,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,fastgrep,0,116.54,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,rg,1,54.78,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,fastgrep,1,117.18,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,rg,2,62.09,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,fastgrep,2,116.88,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,rg,3,48.06,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,fastgrep,3,118.10,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,rg,4,48.40,10000
+regex_impl_trait,impl\s+\w+\s+for\s+\w+,fastgrep,4,117.13,10000
+regex_todo,(TODO|FIXME|HACK)\b,rg,0,47.01,20000
+regex_todo,(TODO|FIXME|HACK)\b,fastgrep,0,131.71,20000
+regex_todo,(TODO|FIXME|HACK)\b,rg,1,48.65,20000
+regex_todo,(TODO|FIXME|HACK)\b,fastgrep,1,132.03,20000
+regex_todo,(TODO|FIXME|HACK)\b,rg,2,48.40,20000
+regex_todo,(TODO|FIXME|HACK)\b,fastgrep,2,132.72,20000
+regex_todo,(TODO|FIXME|HACK)\b,rg,3,45.40,20000
+regex_todo,(TODO|FIXME|HACK)\b,fastgrep,3,130.62,20000
+regex_todo,(TODO|FIXME|HACK)\b,rg,4,52.57,20000
+regex_todo,(TODO|FIXME|HACK)\b,fastgrep,4,131.17,20000
+regex_dot_star,.*,rg,0,42.90,450000
+regex_dot_star,.*,fastgrep,0,648.58,450000
+regex_dot_star,.*,rg,1,49.17,450000
+regex_dot_star,.*,fastgrep,1,639.62,450000
+regex_dot_star,.*,rg,2,45.97,450000
+regex_dot_star,.*,fastgrep,2,631.30,450000
+regex_dot_star,.*,rg,3,48.07,450000
+regex_dot_star,.*,fastgrep,3,630.58,450000
+regex_dot_star,.*,rg,4,47.44,450000
+regex_dot_star,.*,fastgrep,4,628.94,450000

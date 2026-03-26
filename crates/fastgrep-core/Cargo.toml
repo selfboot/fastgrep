@@ -1,0 +1,22 @@
+[package]
+name = "fastgrep-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+regex = { workspace = true }
+regex-syntax = { workspace = true }
+memmap2 = { workspace = true }
+crc32fast = { workspace = true }
+byteorder = { workspace = true }
+ignore = { workspace = true }
+globset = "0.4"
+rayon = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+gix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

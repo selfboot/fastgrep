@@ -1,0 +1,16 @@
+[package]
+name = "fastgrep-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "fastgrep"
+path = "src/main.rs"
+
+[dependencies]
+fastgrep-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+regex = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }

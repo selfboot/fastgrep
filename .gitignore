@@ -1,0 +1,7 @@
+/target
+.fastgrep/
+/testdata/
+results*.csv
+*.swp
+*.swo
+*~
