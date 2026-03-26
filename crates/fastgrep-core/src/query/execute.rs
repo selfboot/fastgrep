@@ -1,11 +1,12 @@
 /// Query execution: lookup → intersect → verify with full regex.
 
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::Result;
-use regex::Regex;
+use memmap2::Mmap;
+use rayon::prelude::*;
+use regex::bytes::Regex as BytesRegex;
 
 use crate::index::delta::DeltaLayer;
 use crate::index::posting;
@@ -57,16 +58,15 @@ pub fn execute_search(
 ) -> Result<SearchResult> {
     let total_files = reader.file_count();
 
-    // Build regex
+    // Build bytes-mode regex (works on &[u8] from mmap, no UTF-8 decode needed)
     let regex_pattern = if opts.case_insensitive {
         format!("(?i){}", &opts.pattern)
     } else {
         opts.pattern.clone()
     };
-    let regex = Regex::new(&regex_pattern)?;
+    let regex = BytesRegex::new(&regex_pattern)?;
 
     // Decompose the pattern into trigrams
-    // For case-insensitive, decompose with folded trigrams (index has them too)
     let decomposed = decompose::decompose(&opts.pattern, opts.case_insensitive);
 
     // Get candidate file IDs from the main index
@@ -82,8 +82,12 @@ pub fn execute_search(
 
     let candidate_count = candidate_ids.len();
 
-    // Filter by file type/glob if specified
-    let candidate_ids = filter_candidates(&candidate_ids, reader, &opts.file_type, &opts.glob);
+    // Pre-compile glob matcher once (not per-file)
+    let glob_matcher = opts.glob.as_ref().and_then(|g| {
+        globset::Glob::new(g)
+            .ok()
+            .map(|glob| glob.compile_matcher())
+    });
 
     // Collect paths of deleted files from delta (to exclude from main index results)
     let deleted_files: HashSet<&str> = match delta {
@@ -91,59 +95,75 @@ pub fn execute_search(
         None => HashSet::new(),
     };
 
-    // Verify: run full regex on candidate files from main index
-    let mut matches = Vec::new();
-    // Track files we already searched (to avoid duplicates with delta)
-    let mut searched_files: HashSet<String> = HashSet::new();
+    // Build list of (rel_path, full_path) for candidate files, applying all filters
+    let candidate_paths: Vec<(&str, std::path::PathBuf)> = candidate_ids
+        .iter()
+        .filter_map(|&file_id| {
+            let rel_path = reader.file_path(file_id)?;
+            // Skip deleted files
+            if deleted_files.contains(rel_path) {
+                return None;
+            }
+            // File type filter
+            if let Some(ref ft) = opts.file_type {
+                let ext = Path::new(rel_path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                if ext != ft.as_str() {
+                    return None;
+                }
+            }
+            // Glob filter
+            if let Some(ref matcher) = glob_matcher {
+                if !matcher.is_match(rel_path) {
+                    return None;
+                }
+            }
+            let full_path = opts.root.join(rel_path);
+            Some((rel_path, full_path))
+        })
+        .collect();
 
-    for &file_id in &candidate_ids {
-        let rel_path = match reader.file_path(file_id) {
-            Some(p) => p,
-            None => continue,
-        };
-        // Skip files that were deleted in working tree
-        if deleted_files.contains(rel_path) {
-            continue;
-        }
-        let full_path = opts.root.join(rel_path);
-        // Always read from disk (not from index) — this way modified files
-        // get their current content even without delta layer
-        if let Ok(file_matches) =
-            search_file(&full_path, rel_path, &regex, opts.before_context, opts.after_context)
-        {
-            matches.extend(file_matches);
-        }
-        searched_files.insert(rel_path.to_string());
-    }
+    // Parallel file verification with mmap
+    let before_ctx = opts.before_context;
+    let after_ctx = opts.after_context;
 
-    // Delta layer: search additional modified/new files not covered by index candidates
+    let matches: Vec<SearchMatch> = candidate_paths
+        .par_iter()
+        .flat_map(|(rel_path, full_path)| {
+            search_file_mmap(full_path, rel_path, &regex, before_ctx, after_ctx)
+                .unwrap_or_default()
+        })
+        .collect();
+
+    // Track searched files for delta dedup
+    let searched_files: HashSet<&str> = candidate_paths.iter().map(|(p, _)| *p).collect();
+
+    // Delta layer: search additional modified/new files
     let mut delta_file_count = 0;
+    let mut delta_matches = Vec::new();
     if let Some(delta) = delta {
         for path in delta.modified_trigrams.keys() {
-            // Skip if already searched via main index
             if searched_files.contains(path.as_str()) {
                 continue;
             }
-            // Apply file type / glob filter
-            if !matches_filter(path, &opts.file_type, &opts.glob) {
+            if !matches_filter(path, &opts.file_type, &glob_matcher) {
                 continue;
             }
             let full_path = opts.root.join(path);
-            if let Ok(file_matches) = search_file(
-                &full_path,
-                path,
-                &regex,
-                opts.before_context,
-                opts.after_context,
-            ) {
-                matches.extend(file_matches);
+            if let Ok(file_matches) = search_file_mmap(&full_path, path, &regex, before_ctx, after_ctx) {
+                delta_matches.extend(file_matches);
             }
             delta_file_count += 1;
         }
     }
 
+    let mut all_matches = matches;
+    all_matches.extend(delta_matches);
+
     Ok(SearchResult {
-        matches,
+        matches: all_matches,
         candidate_count,
         total_files,
         used_index,
@@ -183,7 +203,6 @@ fn execute_plan(plan: &QueryPlan, reader: &IndexReader) -> Vec<u32> {
         let mut alt_union: Option<Vec<u32>> = None;
 
         for group in &plan.alternative_groups {
-            // Each alternative group: intersect its trigrams
             let mut group_result: Option<Vec<u32>> = None;
             for &hash in group {
                 let posting_list = match reader.lookup(hash) {
@@ -218,53 +237,12 @@ fn execute_plan(plan: &QueryPlan, reader: &IndexReader) -> Vec<u32> {
     result.unwrap_or_default()
 }
 
-/// Filter candidate IDs by file type and glob pattern.
-fn filter_candidates(
-    candidates: &[u32],
-    reader: &IndexReader,
+/// Check if a file path passes the type/glob filters.
+fn matches_filter(
+    path: &str,
     file_type: &Option<String>,
-    glob_pattern: &Option<String>,
-) -> Vec<u32> {
-    let glob_matcher = glob_pattern.as_ref().and_then(|g| {
-        globset::Glob::new(g)
-            .ok()
-            .map(|glob| glob.compile_matcher())
-    });
-
-    candidates
-        .iter()
-        .copied()
-        .filter(|&id| {
-            let path = match reader.file_path(id) {
-                Some(p) => p,
-                None => return false,
-            };
-
-            // File type filter
-            if let Some(ref ft) = file_type {
-                let ext = Path::new(path)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
-                if ext != ft.as_str() {
-                    return false;
-                }
-            }
-
-            // Glob filter
-            if let Some(ref matcher) = glob_matcher {
-                if !matcher.is_match(path) {
-                    return false;
-                }
-            }
-
-            true
-        })
-        .collect()
-}
-
-/// Check if a file path passes the type/glob filters (for delta layer files).
-fn matches_filter(path: &str, file_type: &Option<String>, glob_pattern: &Option<String>) -> bool {
+    glob_matcher: &Option<globset::GlobMatcher>,
+) -> bool {
     if let Some(ref ft) = file_type {
         let ext = Path::new(path)
             .extension()
@@ -274,68 +252,119 @@ fn matches_filter(path: &str, file_type: &Option<String>, glob_pattern: &Option<
             return false;
         }
     }
-    if let Some(ref g) = glob_pattern {
-        if let Ok(glob) = globset::Glob::new(g) {
-            let matcher = glob.compile_matcher();
-            if !matcher.is_match(path) {
-                return false;
-            }
+    if let Some(ref matcher) = glob_matcher {
+        if !matcher.is_match(path) {
+            return false;
         }
     }
     true
 }
 
-/// Search a single file with the regex, returning matches with context.
-fn search_file(
+/// Search a single file using mmap (zero-copy) + bytes regex.
+/// Much faster than BufReader line-by-line for large files.
+fn search_file_mmap(
     path: &Path,
     rel_path: &str,
-    regex: &Regex,
+    regex: &BytesRegex,
     before_ctx: usize,
     after_ctx: usize,
 ) -> Result<Vec<SearchMatch>> {
     let file = std::fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let metadata = file.metadata()?;
 
-    let mut matches = Vec::new();
-    let mut context_lines_added = std::collections::HashSet::new();
+    // For empty files, return immediately
+    if metadata.len() == 0 {
+        return Ok(Vec::new());
+    }
 
-    for (i, line) in lines.iter().enumerate() {
-        if regex.is_match(line) {
-            // Add before-context lines
-            let start = i.saturating_sub(before_ctx);
-            for ctx_i in start..i {
-                if context_lines_added.insert(ctx_i) {
-                    matches.push(SearchMatch {
-                        file: rel_path.to_string(),
-                        line_number: ctx_i + 1,
-                        line: lines[ctx_i].clone(),
-                    });
-                }
-            }
+    // Mmap the file for zero-copy access
+    let mmap = unsafe { Mmap::map(&file)? };
+    let data = &mmap[..];
 
-            // Add the match line itself
-            if context_lines_added.insert(i) {
-                matches.push(SearchMatch {
-                    file: rel_path.to_string(),
-                    line_number: i + 1,
-                    line: line.clone(),
-                });
-            }
+    // Find all line start offsets (with sentinel at end)
+    let line_starts = find_line_starts(data);
+    // Actual line count is len - 1 (last entry is sentinel)
+    let line_count = line_starts.len() - 1;
 
-            // Add after-context lines
-            let end = (i + after_ctx + 1).min(lines.len());
-            for ctx_i in (i + 1)..end {
-                if context_lines_added.insert(ctx_i) {
-                    matches.push(SearchMatch {
-                        file: rel_path.to_string(),
-                        line_number: ctx_i + 1,
-                        line: lines[ctx_i].clone(),
-                    });
-                }
-            }
+    // Skip empty files (only sentinel)
+    if line_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Helper: get line bytes (excluding \n and \r\n)
+    let line_bytes = |idx: usize| -> &[u8] {
+        let start = line_starts[idx];
+        let mut end = line_starts[idx + 1];
+        // Strip trailing \n
+        if end > start && data[end - 1] == b'\n' {
+            end -= 1;
+        }
+        // Strip trailing \r
+        if end > start && data[end - 1] == b'\r' {
+            end -= 1;
+        }
+        &data[start..end]
+    };
+
+    // Find which lines match the regex
+    let mut matching_lines: Vec<usize> = Vec::new();
+    for line_idx in 0..line_count {
+        if regex.is_match(line_bytes(line_idx)) {
+            matching_lines.push(line_idx);
         }
     }
 
+    if matching_lines.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Collect output lines (matches + context), deduped
+    let mut output_line_indices: Vec<usize> = Vec::new();
+    let mut seen = HashSet::new();
+
+    for &match_idx in &matching_lines {
+        let ctx_start = match_idx.saturating_sub(before_ctx);
+        let ctx_end = (match_idx + after_ctx + 1).min(line_count);
+
+        for idx in ctx_start..ctx_end {
+            if seen.insert(idx) {
+                output_line_indices.push(idx);
+            }
+        }
+    }
+    output_line_indices.sort_unstable();
+
+    // Build SearchMatch results
+    let file_str = rel_path.to_string();
+    let matches: Vec<SearchMatch> = output_line_indices
+        .iter()
+        .map(|&line_idx| {
+            let line_text = String::from_utf8_lossy(line_bytes(line_idx)).into_owned();
+            SearchMatch {
+                file: file_str.clone(),
+                line_number: line_idx + 1,
+                line: line_text,
+            }
+        })
+        .collect();
+
     Ok(matches)
+}
+
+/// Find the byte offset of every line start in the data, plus a sentinel at data.len().
+/// Returns vec where vec[i] = byte offset of line i, vec[last] = data.len().
+#[inline]
+fn find_line_starts(data: &[u8]) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(data.len() / 40 + 2);
+    starts.push(0);
+    for (i, &byte) in data.iter().enumerate() {
+        if byte == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    // Sentinel: makes line-end calculation uniform
+    if starts.last() != Some(&data.len()) {
+        starts.push(data.len());
+    }
+    starts
 }

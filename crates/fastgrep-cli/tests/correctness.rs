@@ -325,7 +325,7 @@ fn assert_results_match(
                 msg.push_str(&format!("  ... and {} more\n", missing.len() - 10));
                 break;
             }
-            msg.push_str(&format!("    {}:{}:{}\n", m.0, m.1, m.2));
+            msg.push_str(&format!("    {}:{}:{:?}\n", m.0, m.1, m.2));
         }
     }
 
@@ -336,7 +336,7 @@ fn assert_results_match(
                 msg.push_str(&format!("  ... and {} more\n", extra.len() - 10));
                 break;
             }
-            msg.push_str(&format!("    {}:{}:{}\n", m.0, m.1, m.2));
+            msg.push_str(&format!("    {}:{}:{:?}\n", m.0, m.1, m.2));
         }
     }
 

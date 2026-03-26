@@ -1012,6 +1012,140 @@ codegen-units = 1   # Single codegen unit for more aggressive optimization
 strip = true        # Strip debug symbols to reduce binary size
 ```
 
+### 15.4 Verification Phase Performance Optimization
+
+The index lookup phase (trigram → candidate file IDs) is already very fast (microsecond level). The actual bottleneck is the **verification phase** — running full regex matching on candidate files. Before optimization, the verification phase accounted for 70-90% of total search time.
+
+#### Optimization 1: mmap Replaces BufReader (Zero-Copy File Reading)
+
+**Before:**
+```rust
+let file = std::fs::File::open(path)?;
+let reader = BufReader::new(file);
+let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+// Problems:
+// 1. Allocates a String per line (heap allocation)
+// 2. Materializes all lines before matching starts
+// 3. BufReader syscall overhead
+```
+
+**After:**
+```rust
+let file = std::fs::File::open(path)?;
+let mmap = unsafe { Mmap::map(&file)? };
+let data = &mmap[..];  // Zero-copy: OS loads pages on demand
+
+// Scan line start offsets directly on &[u8]
+let line_starts = find_line_starts(data);
+
+// Match line by line without allocating Strings
+for line_idx in 0..line_count {
+    if regex.is_match(line_bytes(line_idx)) { ... }
+}
+```
+
+**Key improvements:**
+- Zero-copy file content (OS page cache mapped directly to user space)
+- No per-line String allocation; `from_utf8_lossy` only runs on output lines
+- Sentinel trick (`line_starts` ends with `data.len()`) unifies line-end calculation
+
+#### Optimization 2: Bytes Regex Replaces String Regex
+
+**Before:**
+```rust
+use regex::Regex;  // Requires &str input (UTF-8)
+// Must convert &[u8] to String first → one UTF-8 decode per line
+```
+
+**After:**
+```rust
+use regex::bytes::Regex as BytesRegex;  // Matches directly on &[u8]
+// mmap's &[u8] passed directly, skipping UTF-8 decode overhead
+```
+
+UTF-8 validation/decoding has non-trivial overhead on large files; bytes regex skips it entirely.
+
+#### Optimization 3: Rayon Parallel File Verification
+
+**Before:**
+```rust
+for &file_id in &candidate_ids {
+    let matches = search_file(...);  // Sequential
+    all_matches.extend(matches);
+}
+```
+
+**After:**
+```rust
+let matches: Vec<SearchMatch> = candidate_paths
+    .par_iter()  // Rayon auto-distributes across all CPU cores
+    .flat_map(|(rel_path, full_path)| {
+        search_file_mmap(full_path, rel_path, &regex, ...)
+            .unwrap_or_default()
+    })
+    .collect();
+```
+
+For patterns with many candidate files (e.g., alternation), multi-core parallelism delivers near-linear speedup.
+
+#### Optimization 4: Direct Byte Reads for Index Binary Search
+
+**Before:**
+```rust
+fn read_lookup_entry(&self, data: &[u8], index: usize) -> LookupEntry {
+    let mut cursor = std::io::Cursor::new(entry_bytes);  // Cursor allocation per comparison
+    LookupEntry::read_from(&mut cursor)
+}
+```
+
+**After:**
+```rust
+#[inline]
+fn read_lookup_entry(&self, data: &[u8], index: usize) -> LookupEntry {
+    let bytes = &data[offset..offset + 16];
+    let ngram_hash = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let offset = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+    LookupEntry { ngram_hash, offset, len }
+}
+```
+
+Eliminates Cursor allocation + trait dispatch; pure pointer arithmetic.
+
+### 15.5 Measured Speedup Data
+
+#### Linux Kernel (92,790 indexed files, cold cache)
+
+Cold cache tests (page cache dropped via `echo 3 > /proc/sys/vm/drop_caches` before each run) represent the realistic scenario where an Agent searches a large codebase for the first time:
+
+| Pattern | rg | fastgrep | Speedup |
+|---------|-----|----------|---------|
+| `KASAN_SHADOW_OFFSET` (rare, 61 matches) | 21.2s | 0.52s | **41x** |
+| `HashMap` (rare, 15 matches) | 19.8s | 0.30s | **66x** |
+
+#### Linux Kernel (92,790 indexed files, warm cache)
+
+With all files in page cache, rg scans 92k files in ~160ms. fastgrep's process startup + meta JSON parsing overhead dominates:
+
+| Pattern | rg | fastgrep | Speedup |
+|---------|-----|----------|---------|
+| `KASAN_SHADOW_OFFSET` (rare) | 158ms | 188ms | 0.8x |
+| `HashMap` (rare) | 163ms | 182ms | 0.9x |
+| `EXPORT_SYMBOL` (common, 40k matches) | 174ms | 421ms | 0.4x |
+| `impl\s+\w+\s+for\s+\w+` (regex) | 167ms | 865ms | 0.2x |
+
+#### Speedup Patterns
+
+| Factor | Effect |
+|--------|--------|
+| **Cold cache** (realistic) | **41-66x** — fastgrep only reads index + candidate files; rg must read all 92k files |
+| **Warm cache** (all in RAM) | 0.2-0.9x — rg's SIMD-optimized mmap scan is hard to beat when I/O is free |
+| **More files** | Greater cold-cache speedup (index eliminates more I/O) |
+| **Rarer pattern** | Greater speedup (fewer candidates → less verification I/O) |
+| **Non-optimizable pattern (`.*`)** | No speedup (full scan fallback) |
+
+**Key insight**: fastgrep's primary advantage is **I/O reduction**. By reading only the index file + a handful of candidate files instead of all 92k files, it achieves dramatic speedups when disk/page-cache is the bottleneck. When all files are already in RAM (warm cache), rg's raw scanning speed with SIMD is difficult to surpass.
+
 ---
 
 ## 16. Testing Strategy
@@ -1022,7 +1156,8 @@ strip = true        # Strip debug symbols to reduce binary size
 |------|------|---------|
 | Unit tests | 20 | Hash determinism, varint encode/decode, format serialization, trigram extraction, query decomposition, case-insensitive decomposition |
 | Integration tests | 9 | End-to-end build + search, regex, alternation, case sensitivity, file filtering, context lines, full scan fallback, delta layer added files, delta layer deleted file exclusion |
-| **Total** | **29** | |
+| Correctness tests | 6 | 24 patterns against naive grep line-by-line comparison, no false negatives verification, case-insensitive accuracy, context line correctness, file type filter correctness, edge case patterns |
+| **Total** | **35** | |
 
 ### 16.2 Key Test Cases
 
@@ -1115,6 +1250,9 @@ CSV raw data + Markdown report tables:
 - [ ] Sparse n-gram: Select variable-length n-grams based on byte-pair frequency
 - [ ] Complete regex AST traversal (currently only handles Literal/Concat/Alternation)
 - [x] ~~Index-accelerated case-insensitive search (lowercase-normalized index)~~ ✅ Done: Stores folded trigrams at build time, uses folded extraction at query time
+- [x] ~~mmap + bytes regex for file verification~~ ✅ Done: Zero-copy file reading, regex matches directly on `&[u8]`
+- [x] ~~Parallel file verification~~ ✅ Done: Rayon `par_iter` for multi-core candidate file search
+- [x] ~~Direct byte reads for index binary search~~ ✅ Done: Eliminates Cursor allocation overhead
 
 ### Phase 3: Incremental Updates
 - [x] ~~Delta layer actually integrated into the search pipeline~~ ✅ Done: `execute_search` accepts `Option<&DeltaLayer>`, excludes deleted files, searches added/modified files

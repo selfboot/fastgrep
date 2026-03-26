@@ -246,23 +246,28 @@ The benchmark covers 9 patterns representing typical Agent search scenarios:
 | `(TODO\|FIXME\|HACK)\b` | Regex (alternation) | Three alternatives; index takes their union |
 | `.*` | Non-optimizable | No literals; falls back to full scan (control group) |
 
-### Real-World Benchmark Results (1,909 files)
+### Real-World Benchmark Results
+
+#### Linux Kernel (92,790 files, cold cache — realistic Agent scenario)
 
 ```
-| Pattern          | rg (ms) | fastgrep (ms) | Speedup |
-|------------------|---------|---------------|---------|
-| literal_rare     |  175.8  |    49.8       |  3.5x   |
-| literal_medium   |  173.9  |    47.1       |  3.7x   |
-| literal_pub_fn   |  181.3  |    47.7       |  3.8x   |
-| regex_impl_trait |  190.0  |    79.2       |  2.3x   |
-| regex_use_stmt   |  180.8  |   114.6       |  1.5x   |
-| regex_todo       |  251.7  |   180.3       |  1.4x   |
-| literal_common   |  167.2  |   173.9       |  1.0x   |
-| regex_fn_decl    |  176.3  |   177.3       |  1.0x   |
-| regex_dot_star   | 4296.2  |  1162.9       |  3.7x   |
+| Pattern                  | rg      | fastgrep | Speedup |
+|--------------------------|---------|----------|---------|
+| KASAN_SHADOW_OFFSET      | 21.2s   | 0.52s    |   41x   |
+| HashMap                  | 19.8s   | 0.30s    |   66x   |
 ```
 
-**Takeaway**: the rarer the pattern, the greater the speedup; the larger the repo (more files), the higher the gains.
+#### Linux Kernel (92,790 files, warm cache)
+
+```
+| Pattern                  | rg (ms) | fastgrep (ms) | Speedup |
+|--------------------------|---------|---------------|---------|
+| KASAN_SHADOW_OFFSET      |  158    |   188         |  0.8x   |
+| HashMap                  |  163    |   182         |  0.9x   |
+| EXPORT_SYMBOL (40k hits) |  174    |   421         |  0.4x   |
+```
+
+**Takeaway**: fastgrep's advantage is **I/O reduction** — on cold cache (the realistic Agent scenario), it reads only the index + a few candidate files instead of all 92k files, achieving **41-66x** speedup. On warm cache (everything in RAM), rg's SIMD scanning is hard to beat.
 
 > For the full benchmark methodology, see [BENCHMARK.md](BENCHMARK.md).
 

@@ -1010,6 +1010,92 @@ codegen-units = 1   # 单编译单元，更激进优化
 strip = true        # 剥离调试符号，缩小二进制
 ```
 
+### 15.4 验证阶段性能优化
+
+索引查找阶段（trigram → 候选文件 ID）本身已经很快（微秒级），实际瓶颈在**验证阶段**——对候选文件执行完整 regex 匹配。优化前验证阶段占总搜索时间的 70-90%。
+
+#### 优化 1：mmap 替代 BufReader（零拷贝文件读取）
+
+**优化前**：
+```rust
+let file = std::fs::File::open(path)?;
+let reader = BufReader::new(file);
+let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+// 问题：每行分配 String，物化整个文件，系统调用开销
+```
+
+**优化后**：
+```rust
+let mmap = unsafe { Mmap::map(&file)? };
+let data = &mmap[..];  // 零拷贝：OS 按需分页加载
+let line_starts = find_line_starts(data);
+for line_idx in 0..line_count {
+    if regex.is_match(line_bytes(line_idx)) { ... }  // 直接在 &[u8] 上匹配
+}
+```
+
+#### 优化 2：bytes regex 替代 String regex
+
+```rust
+use regex::bytes::Regex as BytesRegex;  // 直接在 &[u8] 上匹配，省去 UTF-8 解码
+```
+
+#### 优化 3：rayon 并行文件验证
+
+```rust
+let matches: Vec<SearchMatch> = candidate_paths
+    .par_iter()  // rayon 自动分配到所有 CPU 核心
+    .flat_map(|(rel_path, full_path)| {
+        search_file_mmap(full_path, rel_path, &regex, ...).unwrap_or_default()
+    })
+    .collect();
+```
+
+#### 优化 4：索引二分查找直接字节读取
+
+```rust
+#[inline]
+fn read_lookup_entry(&self, data: &[u8], index: usize) -> LookupEntry {
+    let bytes = &data[offset..offset + 16];
+    let ngram_hash = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    // 消除 Cursor 分配 + trait 虚调用，纯指针算术
+}
+```
+
+### 15.5 实测加速数据
+
+#### Linux Kernel（92,790 索引文件，冷缓存）
+
+冷缓存测试（每次运行前通过 `echo 3 > /proc/sys/vm/drop_caches` 清空 page cache）代表 Agent 首次搜索大仓库的真实场景：
+
+| 模式 | rg | fastgrep | 加速比 |
+|------|-----|----------|--------|
+| `KASAN_SHADOW_OFFSET`（稀有，61 匹配） | 21.2s | 0.52s | **41x** |
+| `HashMap`（稀有，15 匹配） | 19.8s | 0.30s | **66x** |
+
+#### Linux Kernel（92,790 索引文件，热缓存）
+
+所有文件在 page cache 中时，rg 扫描 9.2 万文件仅需 ~160ms。此时 fastgrep 的进程启动 + meta JSON 解析开销成为主导：
+
+| 模式 | rg | fastgrep | 加速比 |
+|------|-----|----------|--------|
+| `KASAN_SHADOW_OFFSET`（稀有） | 158ms | 188ms | 0.8x |
+| `HashMap`（稀有） | 163ms | 182ms | 0.9x |
+| `EXPORT_SYMBOL`（常见，4 万匹配） | 174ms | 421ms | 0.4x |
+| `impl\s+\w+\s+for\s+\w+`（正则） | 167ms | 865ms | 0.2x |
+
+#### 加速规律
+
+| 因素 | 影响 |
+|------|------|
+| **冷缓存**（真实场景） | **41-66x** — fastgrep 仅读索引 + 候选文件；rg 必须读全部 9.2 万文件 |
+| **热缓存**（全在内存） | 0.2-0.9x — rg 的 SIMD 优化 mmap 扫描在 I/O 免费时难以超越 |
+| 文件越多 | 冷缓存加速越大（索引消除更多 I/O） |
+| 模式越稀有 | 加速越大（候选越少 → 验证 I/O 越少） |
+| 不可优化模式（`.*`） | 无加速（回退全扫描） |
+
+**核心洞察**：fastgrep 的主要优势在于 **I/O 减少**。通过仅读取索引文件 + 少量候选文件（而非全部 9.2 万文件），在磁盘/page-cache 成为瓶颈时实现极大加速。当所有文件已在 RAM 中（热缓存），rg 基于 SIMD 的原始扫描速度难以超越。
+
 ---
 
 ## 16. 测试策略
@@ -1020,7 +1106,8 @@ strip = true        # 剥离调试符号，缩小二进制
 |------|------|---------|
 | 单元测试 | 20 | 哈希确定性、varint 编解码、格式序列化、trigram 提取、查询分解、大小写不敏感分解 |
 | 集成测试 | 9 | 端到端构建+搜索、正则、alternation、大小写、文件过滤、上下文行、全扫描回退、Delta 层新增文件、Delta 层删除文件排除 |
-| **合计** | **29** | |
+| 正确性测试 | 6 | 24 种模式逐行对比 naive grep、无漏匹配验证、大小写不敏感准确性、上下文行正确性、文件类型过滤正确性、边界情况 |
+| **合计** | **35** | |
 
 ### 16.2 关键测试用例
 
@@ -1113,6 +1200,9 @@ CSV 原始数据 + Markdown 报告表格：
 - [ ] Sparse n-gram：基于字符对频率选择变长 n-gram
 - [ ] 完整 regex AST 遍历（当前仅处理 Literal/Concat/Alternation）
 - [x] ~~索引加速的 case-insensitive 搜索（lowercase 归一化索引）~~ ✅ 已完成：构建时存储折叠 trigram，查询时使用折叠提取
+- [x] ~~mmap + bytes regex 文件验证~~ ✅ 已完成：零拷贝文件读取，regex 直接在 `&[u8]` 上匹配
+- [x] ~~并行文件验证~~ ✅ 已完成：Rayon `par_iter` 多核并行搜索候选文件
+- [x] ~~索引二分查找直接字节读取~~ ✅ 已完成：消除 Cursor 分配开销
 
 ### Phase 3: 增量更新
 - [x] ~~Delta 层实际集成到搜索管线~~ ✅ 已完成：`execute_search` 接受 `Option<&DeltaLayer>`，排除删除文件、搜索新增/修改文件

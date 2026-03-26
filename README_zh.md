@@ -241,23 +241,28 @@ fastgrep-bench report --input results.csv
 | `(TODO\|FIXME\|HACK)\b` | 正则（alternation） | 三选一，索引取并集 |
 | `.*` | 不可优化 | 无字面量，回退全扫描（对照组） |
 
-### 真实仓库测试结果（1,909 文件）
+### 实测结果
+
+#### Linux Kernel（92,790 文件，冷缓存 — Agent 真实场景）
 
 ```
-| Pattern          | rg (ms) | fastgrep (ms) | Speedup |
-|------------------|---------|---------------|---------|
-| literal_rare     |  175.8  |    49.8       |  3.5x   |
-| literal_medium   |  173.9  |    47.1       |  3.7x   |
-| literal_pub_fn   |  181.3  |    47.7       |  3.8x   |
-| regex_impl_trait |  190.0  |    79.2       |  2.3x   |
-| regex_use_stmt   |  180.8  |   114.6       |  1.5x   |
-| regex_todo       |  251.7  |   180.3       |  1.4x   |
-| literal_common   |  167.2  |   173.9       |  1.0x   |
-| regex_fn_decl    |  176.3  |   177.3       |  1.0x   |
-| regex_dot_star   | 4296.2  |  1162.9       |  3.7x   |
+| 模式                      | rg      | fastgrep | 加速比  |
+|--------------------------|---------|----------|--------|
+| KASAN_SHADOW_OFFSET      | 21.2s   | 0.52s    |  41x   |
+| HashMap                  | 19.8s   | 0.30s    |  66x   |
 ```
 
-**规律**：模式越稀有加速越明显；仓库越大（文件越多）收益越高。
+#### Linux Kernel（92,790 文件，热缓存）
+
+```
+| 模式                      | rg (ms) | fastgrep (ms) | 加速比 |
+|--------------------------|---------|---------------|--------|
+| KASAN_SHADOW_OFFSET      |  158    |   188         |  0.8x  |
+| HashMap                  |  163    |   182         |  0.9x  |
+| EXPORT_SYMBOL（4 万匹配）  |  174    |   421         |  0.4x  |
+```
+
+**核心洞察**：fastgrep 的优势在于 **I/O 减少**——冷缓存（Agent 真实场景）下仅读索引 + 少量候选文件，实现 **41-66x** 加速。热缓存时 rg 的 SIMD 扫描难以超越。
 
 > 详细压测方案见 [BENCHMARK.md](BENCHMARK.md)。
 

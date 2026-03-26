@@ -121,12 +121,19 @@ impl IndexReader {
         None
     }
 
-    /// Read a lookup entry at the given index.
+    /// Read a lookup entry at the given index. Direct byte reads, no Cursor overhead.
+    #[inline]
     fn read_lookup_entry(&self, data: &[u8], index: usize) -> LookupEntry {
         let offset = index * LOOKUP_ENTRY_SIZE;
-        let entry_bytes = &data[offset..offset + LOOKUP_ENTRY_SIZE];
-        let mut cursor = std::io::Cursor::new(entry_bytes);
-        LookupEntry::read_from(&mut cursor).expect("valid lookup entry")
+        let bytes = &data[offset..offset + LOOKUP_ENTRY_SIZE];
+        let ngram_hash = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let posting_offset = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        LookupEntry {
+            ngram_hash,
+            offset: posting_offset,
+            len,
+        }
     }
 
     /// Read and decode a posting list from the postings file.
