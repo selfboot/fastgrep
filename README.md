@@ -1,151 +1,152 @@
 # fastgrep
 
-**Agent 友好的快速正则搜索工具** — 基于 trigram 倒排索引，在大型代码仓库上实现 10-70x 加速。
+**Agent-friendly fast regex search tool** — powered by a trigram inverted index, achieving 10–70× speedup on large codebases.
 
-## 问题背景
+## Motivation
 
-在 Agent 工作流中，`grep`/`rg` 是最高频的操作之一。当代码仓库规模达到数万文件时，ripgrep 的全文扫描往往需要数百毫秒甚至超过 15 秒。`fastgrep` 通过构建 trigram 倒排索引，先将候选文件缩小到极少数，再仅对这些文件执行完整正则匹配，从而大幅降低搜索延迟。
+In Agent workflows, `grep`/`rg` is one of the most frequent operations. When a codebase grows to tens of thousands of files, ripgrep's full-text scan can take hundreds of milliseconds or even exceed 15 seconds. `fastgrep` builds a trigram inverted index to narrow candidates down to a handful of files first, then runs the full regex match only on those files, drastically reducing search latency.
 
 ```
-# 在 2244 个文件的仓库中搜索 "HashMap"
+# Searching for "HashMap" in a repo with 2,244 files
 $ fastgrep search "HashMap"
 [fastgrep] 16 matches in 6 candidates / 2244 total files (index: used)
-#                          ↑ 仅扫描 6 个文件，而非全部 2244 个
+#                          ↑ only 6 files scanned, not all 2,244
 ```
 
-## 快速开始
+## Quick Start
 
-### 安装
+### Installation
 
 ```bash
-# 从源码构建并安装
+# Build and install from source
 cd /path/to/fastgrep
 bash scripts/install.sh
 
-# 或手动构建
+# Or build manually
 cargo build --release -p fastgrep-cli
 cp target/release/fastgrep ~/.local/bin/
 ```
 
-确保 `~/.local/bin` 在 `$PATH` 中。
+Make sure `~/.local/bin` is in your `$PATH`.
 
-### 30 秒上手
+### Up and Running in 30 Seconds
 
 ```bash
-# 进入你的项目目录
+# Enter your project directory
 cd /path/to/your/project
 
-# 建索引（首次使用，后续搜索会自动维护）
+# Build the index (first time only — subsequent searches maintain it automatically)
 fastgrep index
 
-# 搜索！
+# Search!
 fastgrep search "HashMap"
 ```
 
-## 命令详解
+## Command Reference
 
-### `fastgrep index` — 构建索引
+### `fastgrep index` — Build the Index
 
-扫描目录下所有文件，提取 trigram，写入 `.fastgrep/` 目录。
+Scans all files under a directory, extracts trigrams, and writes the index to the `.fastgrep/` directory. Large files (>1 MB) are automatically skipped. Progress is displayed in real time during indexing.
 
 ```bash
-fastgrep index                    # 索引当前目录
-fastgrep index --path /some/repo  # 索引指定目录
+fastgrep index                    # Index the current directory
+fastgrep index --path /some/repo  # Index a specific directory
 ```
 
-**输出示例：**
+**Example output:**
 ```
 Building index for /data/home/user/linux...
 Index built: 74521 files, 389204 trigrams in 2341ms
 ```
 
-**注意事项：**
-- 自动尊重 `.gitignore`，跳过 `.git/` 和 `.fastgrep/` 目录
-- 自动检测并跳过二进制文件（检查前 8KB 是否含 null 字节）
-- 使用 Rayon 进行多核并行处理
+**Notes:**
+- Automatically respects `.gitignore`; skips `.git/` and `.fastgrep/` directories
+- Automatically detects and skips binary files (checks the first 8 KB for null bytes)
+- Automatically skips files larger than 1 MB
+- Uses Rayon for multi-core parallel processing
 
-### `fastgrep search` — 搜索
+### `fastgrep search` — Search
 
 ```bash
 fastgrep search <PATTERN> [OPTIONS]
 ```
 
-#### 基础搜索
+#### Basic Search
 
 ```bash
-# 字面量搜索
+# Literal search
 fastgrep search "HashMap"
 
-# 正则搜索
+# Regex search
 fastgrep search "impl\s+\w+\s+for\s+\w+"
 
 # Alternation
 fastgrep search "(TODO|FIXME|HACK)"
 ```
 
-#### 选项
+#### Options
 
-| 选项 | 短写 | 说明 | 默认值 |
-|------|------|------|--------|
-| `--before-context <N>` | `-B` | 匹配行之前的上下文行数 | 0 |
-| `--after-context <N>` | `-A` | 匹配行之后的上下文行数 | 0 |
-| `--context <N>` | `-C` | 前后上下文行数（覆盖 -A/-B） | — |
-| `--ignore-case` | `-i` | 大小写不敏感搜索 | false |
-| `--type <EXT>` | `-t` | 按文件扩展名过滤 | — |
-| `--glob <PATTERN>` | `-g` | 按 glob 模式过滤文件 | — |
-| `--format <FMT>` | `-f` | 输出格式：`text` 或 `json` | text |
-| `--path <DIR>` | `-p` | 搜索目录 | 当前目录 |
-| `--auto-index` | — | 索引缺失或过期时自动重建 | true |
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--before-context <N>` | `-B` | Number of context lines before a match | 0 |
+| `--after-context <N>` | `-A` | Number of context lines after a match | 0 |
+| `--context <N>` | `-C` | Context lines before and after (overrides -A/-B) | — |
+| `--ignore-case` | `-i` | Case-insensitive search (uses lowercase-folded trigrams from index) | false |
+| `--type <EXT>` | `-t` | Filter by file extension | — |
+| `--glob <PATTERN>` | `-g` | Filter files by glob pattern | — |
+| `--format <FMT>` | `-f` | Output format: `text` or `json` | text |
+| `--path <DIR>` | `-p` | Directory to search | current dir |
+| `--no-auto-index` | — | Disable automatic index build/rebuild | false |
 
-#### 实用示例
+#### Practical Examples
 
 ```bash
-# 带上下文搜索 TODO/FIXME
+# Search for TODO/FIXME with context
 fastgrep search "(TODO|FIXME)" -C 2
 
-# 仅在 Rust 文件中搜索
+# Search only in Rust files
 fastgrep search "pub fn" -t rs
 
-# 仅在 TSX 文件中搜索
+# Search only in TSX files
 fastgrep search "useState" -g "*.tsx"
 
-# 大小写不敏感
+# Case-insensitive search
 fastgrep search "error" -i
 
-# JSON 输出（适合 agent/脚本解析）
+# JSON output (ideal for agent/script consumption)
 fastgrep search "HashMap" --format json
 
-# 指定目录
+# Specify a directory
 fastgrep search "HashMap" --path /path/to/repo
 ```
 
-#### 输出格式
+#### Output Formats
 
-**Text 格式**（默认，ripgrep 兼容）：
+**Text format** (default, ripgrep-compatible):
 ```
 crates/fastgrep-core/src/index/builder.rs
 42:use crate::ngram::extract::extract_trigrams;
 ```
 
-文件名以洋红色高亮，行号以绿色高亮。尊重 `NO_COLOR` 环境变量。
+File names are highlighted in magenta, line numbers in green. Respects the `NO_COLOR` environment variable.
 
-**JSON 格式**（`--format json`，一行一条 JSON）：
+**JSON format** (`--format json`, one JSON object per line):
 ```json
 {"file":"src/index/builder.rs","line_number":42,"line":"use crate::ngram::extract::extract_trigrams;"}
 ```
 
-**统计信息**（始终输出到 stderr）：
+**Statistics** (always printed to stderr):
 ```
 [fastgrep] 16 matches in 6 candidates / 2244 total files (index: used)
 ```
 
-### `fastgrep status` — 查看索引状态
+### `fastgrep status` — View Index Status
 
 ```bash
 fastgrep status
 ```
 
-**输出示例：**
+**Example output:**
 ```
 Index status:
   Root:         /data/home/user/fastgrep
@@ -156,92 +157,96 @@ Index status:
   Index size:   416 KB (lookup: 231 KB, postings: 184 KB)
 ```
 
-如果索引过期（HEAD commit 与构建时不同），会显示：
+If the index is stale (HEAD commit differs from the one recorded at build time), it will show:
 ```
   Fresh:        NO — rebuild recommended
 ```
 
-## 索引自动管理
+## Automatic Index Management
 
-默认行为（`--auto-index true`）：
+Default behavior (auto-index enabled; disable with `--no-auto-index`):
 
-1. **首次搜索**：无索引 → 自动构建
-2. **后续搜索**：索引存在 → 检查 HEAD commit 是否匹配
-3. **索引过期**：HEAD 已变化 → 自动重建
-4. **索引新鲜**：直接使用，零额外开销
+1. **First search**: no index exists → build automatically
+2. **Subsequent searches**: index exists → check freshness
+3. **Stale index**: HEAD has changed → rebuild automatically
+4. **Fresh index**: use as-is, zero overhead
+
+**Freshness model:**
+- **Git repositories**: freshness is determined by comparing the current HEAD commit hash against the one stored in the index. When the index is fresh but there are uncommitted changes, a delta overlay layer is applied to cover those changes.
+- **Non-git directories**: the existing index is trusted as-is. Rebuild manually with `fastgrep index` when the directory contents change.
 
 ```bash
-# 不想自动建索引？手动管理：
-fastgrep search "pattern" --auto-index false
+# Don't want automatic indexing? Manage it manually:
+fastgrep search "pattern" --no-auto-index
 ```
 
-## 何时使用 fastgrep vs rg
+## When to Use fastgrep vs rg
 
-| 场景 | 推荐工具 |
-|------|----------|
-| 大仓库（>10k 文件），重复搜索 | **fastgrep** ✅ |
-| 包含稀有字面量的模式 | **fastgrep** ✅ |
-| Agent 工作流中的高频搜索 | **fastgrep** ✅ |
-| 小仓库（<1k 文件） | rg（索引开销不值得） |
-| 纯正则无字面量（`.*`、`\d+`） | rg（无法利用索引） |
-| 一次性搜索 | rg（不需要建索引） |
+| Scenario | Recommended Tool |
+|----------|------------------|
+| Large repo (>10k files), repeated searches | **fastgrep** ✅ |
+| Patterns containing rare literals | **fastgrep** ✅ |
+| High-frequency searches in Agent workflows | **fastgrep** ✅ |
+| Small repo (<1k files) | rg (index overhead not worthwhile) |
+| Pure regex with no literals (`.*`, `\d+`) | rg (cannot leverage index) |
+| One-off searches | rg (no need to build an index) |
 
-**核心原则**：模式中字面量越多越稀有 → fastgrep 越有优势。
+**Core principle**: the more literals in the pattern — and the rarer they are — the greater fastgrep's advantage.
 
-## 作为 Claude Code Skill 使用
+## Using as a Claude Code Skill
 
-### 安装 Skill
+### Install the Skill
 
 ```bash
 cp skill/fastgrep.md ~/.claude/skills/
 ```
 
-安装后，Claude Code 在需要搜索大仓库时可以优先调用 `fastgrep search` 而非 `rg`。
+Once installed, Claude Code can prefer `fastgrep search` over `rg` when searching large codebases.
 
-## 压测：fastgrep vs ripgrep
+## Benchmark: fastgrep vs ripgrep
 
-### 快速开始
+### Quick Start
 
 ```bash
-# 1. 准备语料（三选一）
+# 1. Prepare a corpus (pick one)
 
-# 方案 A：生成 10,000 文件的合成语料（推荐初次体验）
+# Option A: Generate a synthetic corpus of 10,000 files (recommended for first try)
 fastgrep-bench prepare --corpus medium --output ./testdata
 CORPUS=./testdata/medium
 
-# 方案 B：用自己的项目目录
+# Option B: Use your own project directory
 CORPUS=/path/to/your/project
 
-# 方案 C：克隆 Linux Kernel 极限压测（~74,000 文件）
+# Option C: Clone the Linux Kernel for extreme benchmarking (~74,000 files)
 git clone --depth 1 https://github.com/torvalds/linux.git ./testdata/linux-kernel
 CORPUS=./testdata/linux-kernel
 
-# 2. 跑压测（10 次迭代取中位数）
+# 2. Run the benchmark (median of 10 iterations)
 fastgrep-bench run --corpus $CORPUS --iterations 10 --output results.csv
 
-# 3. 生成报告
+# 3. Generate the report
 fastgrep-bench report --input results.csv
 ```
 
-> **rg 不在 PATH？** 用环境变量指定：`RG_PATH=/path/to/rg fastgrep-bench run ...`
+> **rg not in PATH?** Specify it via environment variable: `RG_PATH=/path/to/rg fastgrep-bench run ...`
 
-### 测试模式
+### Test Patterns
 
-压测覆盖 9 种模式，代表典型的 Agent 搜索场景：
+The benchmark covers 9 patterns representing typical Agent search scenarios:
 
-| 模式 | 类型 | 说明 |
-|------|------|------|
-| `fn` | 字面量（常见） | 几乎每个文件都有，索引无优势 |
-| `HashMap` | 字面量（中等） | 部分文件有，索引可过滤大部分 |
-| `SPDX-License-Identifier` | 字面量（稀有） | 极少文件有，**加速最明显** |
-| `pub fn new` | 字面量（多词） | 多段 trigram 交集，过滤效果好 |
-| `fn\s+\w+\s*\(` | 正则 | 含字面量 `fn`，可部分优化 |
-| `use\s+\w+::\w+` | 正则 | 含字面量 `use`，可部分优化 |
-| `impl\s+\w+\s+for\s+\w+` | 正则 | 含 `impl` + `for`，多段字面量 |
-| `(TODO\|FIXME\|HACK)\b` | 正则（alternation） | 三选一，索引取并集 |
-| `.*` | 不可优化 | 无字面量，回退全扫描（对照组） |
+| Pattern | Type | Description |
+|---------|------|-------------|
+| `fn` | Literal (common) | Present in almost every file; index has no advantage |
+| `HashMap` | Literal (medium) | Present in some files; index filters out most |
+| `SPDX-License-Identifier` | Literal (rare) | Present in very few files; **greatest speedup** |
+| `pub fn new` | Literal (multi-word) | Multiple trigram intersections; excellent filtering |
+| `fn\s+\w+\s*\(` | Regex | Contains literal `fn`; partially optimizable |
+| `use\s+\w+::\w+` | Regex | Contains literal `use`; partially optimizable |
+| `impl\s+\w+\s+for\s+\w+` | Regex | Contains `impl` + `for`; multiple literal segments |
+| `(TODO\|FIXME\|HACK)\b` | Regex (alternation) | Three alternatives; index takes their union |
+| `.*` | Non-optimizable | No literals; falls back to full scan (control group) |
 
-### 真实仓库测试结果（1,909 文件）
+### Real-World Benchmark Results (1,909 files)
 
 ```
 | Pattern          | rg (ms) | fastgrep (ms) | Speedup |
@@ -257,53 +262,53 @@ fastgrep-bench report --input results.csv
 | regex_dot_star   | 4296.2  |  1162.9       |  3.7x   |
 ```
 
-**规律**：模式越稀有加速越明显；仓库越大（文件越多）收益越高。
+**Takeaway**: the rarer the pattern, the greater the speedup; the larger the repo (more files), the higher the gains.
 
-> 详细压测方案见 [BENCHMARK.md](BENCHMARK.md)。
+> For the full benchmark methodology, see [BENCHMARK.md](BENCHMARK.md).
 
-## 项目结构
+## Project Structure
 
 ```
 fastgrep/
-├── Cargo.toml                        # Workspace 根
+├── Cargo.toml                        # Workspace root
 ├── crates/
-│   ├── fastgrep-core/src/            # 核心库
-│   │   ├── ngram/extract.rs          #   Trigram 提取 + FNV-1a 哈希
-│   │   ├── ngram/weight.rs           #   CRC32 权重 + 字符对频率表
-│   │   ├── index/format.rs           #   磁盘格式定义
-│   │   ├── index/posting.rs          #   Varint 编码 + 集合运算
-│   │   ├── index/builder.rs          #   并行索引构建
-│   │   ├── index/writer.rs           #   索引序列化
-│   │   ├── index/reader.rs           #   Mmap 读取 + 二分查找
-│   │   ├── index/delta.rs            #   未提交变更覆盖层
-│   │   ├── query/decompose.rs        #   正则 → trigram 分解
-│   │   ├── query/plan.rs             #   查询计划优化
-│   │   ├── query/execute.rs          #   搜索执行引擎
-│   │   └── git.rs                    #   Git 集成
+│   ├── fastgrep-core/src/            # Core library
+│   │   ├── ngram/extract.rs          #   Trigram extraction + FNV-1a hashing
+│   │   ├── ngram/weight.rs           #   CRC32 weighting + character-pair frequency table
+│   │   ├── index/format.rs           #   On-disk format definition
+│   │   ├── index/posting.rs          #   Varint encoding + set operations
+│   │   ├── index/builder.rs          #   Parallel index building
+│   │   ├── index/writer.rs           #   Index serialization
+│   │   ├── index/reader.rs           #   Mmap reader + binary search
+│   │   ├── index/delta.rs            #   Uncommitted-changes overlay layer
+│   │   ├── query/decompose.rs        #   Regex → trigram decomposition
+│   │   ├── query/plan.rs             #   Query plan optimization
+│   │   ├── query/execute.rs          #   Search execution engine
+│   │   └── git.rs                    #   Git integration
 │   ├── fastgrep-cli/src/             # CLI
-│   │   ├── main.rs                   #   clap 入口
+│   │   ├── main.rs                   #   clap entry point
 │   │   ├── cmd/{index,search,status}.rs
-│   │   └── output.rs                 #   输出格式化
-│   └── fastgrep-bench/src/           # 压测工具
-├── skill/fastgrep.md                 # Claude Code Skill 定义
-└── scripts/install.sh                # 安装脚本
+│   │   └── output.rs                 #   Output formatting
+│   └── fastgrep-bench/src/           # Benchmark tool
+├── skill/fastgrep.md                 # Claude Code Skill definition
+└── scripts/install.sh                # Install script
 ```
 
-## 依赖
+## Dependencies
 
-| 用途 | Crate |
-|------|-------|
-| 正则引擎 | `regex` + `regex-syntax` |
-| 内存映射 | `memmap2` |
-| 哈希 | `crc32fast`、FNV-1a（内置） |
-| 字节序 | `byteorder` |
-| CLI | `clap`（derive 模式） |
-| 文件遍历 | `ignore`（.gitignore 感知） |
-| Glob 匹配 | `globset` |
-| 并行 | `rayon` |
-| 错误处理 | `anyhow` + `thiserror` |
+| Purpose | Crate |
+|---------|-------|
+| Regex engine | `regex` + `regex-syntax` |
+| Memory mapping | `memmap2` |
+| Hashing | `crc32fast`, FNV-1a (built-in) |
+| Byte order | `byteorder` |
+| CLI | `clap` (derive mode) |
+| File traversal | `ignore` (.gitignore-aware) |
+| Glob matching | `globset` |
+| Parallelism | `rayon` |
+| Error handling | `anyhow` + `thiserror` |
 | Git | `gix` |
-| 序列化 | `serde` + `serde_json` |
+| Serialization | `serde` + `serde_json` |
 
 ## License
 

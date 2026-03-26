@@ -1,10 +1,10 @@
-# fastgrep 技术实现报告
+# fastgrep Technical Implementation Report
 
-## 1. 系统架构总览
+## 1. System Architecture Overview
 
-fastgrep 是一个基于 trigram 倒排索引的快速正则搜索工具。核心思想来源于信息检索领域：**先用倒排索引快速缩小候选集，再对候选文件执行精确匹配**。
+fastgrep is a fast regex search tool based on trigram inverted indexes. The core idea comes from the field of information retrieval: **first use an inverted index to quickly narrow down the candidate set, then perform exact matching on the candidate files**.
 
-### 1.1 架构图
+### 1.1 Architecture Diagram
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -34,90 +34,90 @@ fastgrep 是一个基于 trigram 倒排索引的快速正则搜索工具。核�
 └─────────────────────────────────────────────────────┘
 ```
 
-### 1.2 完整搜索流程示例
+### 1.2 Complete Search Flow Example
 
-以搜索 `impl.*Display` 为例：
+Using the search for `impl.*Display` as an example:
 
 ```
-输入: "impl.*Display"
+Input: "impl.*Display"
                 │
         ┌───────▼───────┐
-  Step 1│  regex-syntax  │  解析为 HIR（High-level IR）
-        │  AST 遍历      │
+  Step 1│  regex-syntax  │  Parse into HIR (High-level IR)
+        │  AST traversal │
         └───────┬───────┘
-                │  提取字面量子串: ["impl", "Display"]
+                │  Extract literal substrings: ["impl", "Display"]
         ┌───────▼───────┐
-  Step 2│  Trigram 分解   │  "impl" → [imp, mpl]
+  Step 2│  Trigram decomp│  "impl" → [imp, mpl]
         │                │  "Display" → [Dis, isp, spl, pla, lay]
         └───────┬───────┘
                 │  must_match = [hash(imp), hash(mpl), hash(Dis), ...]
         ┌───────▼───────┐
-  Step 3│  查询计划       │  按 posting list 大小排序
-        │                │  最稀有的 trigram 排在前面
+  Step 3│  Query plan    │  Sort by posting list size
+        │                │  Rarest trigrams first
         └───────┬───────┘
                 │  ordered = [hash(Dis), hash(isp), hash(mpl), ...]
         ┌───────▼───────┐
-  Step 4│  索引查找       │  二分查找 lookup table
-        │  + 交集运算     │  逐一 intersect posting lists
-        │                │  早期终止：交集为空立即返回
+  Step 4│  Index lookup  │  Binary search the lookup table
+        │  + intersection│  Intersect posting lists one by one
+        │                │  Early termination: return immediately if intersection is empty
         └───────┬───────┘
                 │  candidate_file_ids = [12, 45, 203]
         ┌───────▼───────┐
-  Step 5│  全文验证       │  仅对 3 个文件执行完整 regex
-        │                │  （而非扫描全部 74k 文件）
+  Step 5│  Full-text     │  Run full regex on only 3 files
+        │  verification  │  (instead of scanning all 74k files)
         └───────┬───────┘
                 │
-             输出结果
+             Output results
 ```
 
 ---
 
-## 2. 磁盘索引格式
+## 2. On-Disk Index Format
 
-索引存储在 `.fastgrep/` 目录下，由三个文件组成。
+The index is stored in the `.fastgrep/` directory and consists of three files.
 
-### 2.1 index.lookup — 查找表
+### 2.1 index.lookup — Lookup Table
 
 ```
-偏移      大小      字段              说明
+Offset    Size      Field             Description
 ─────────────────────────────────────────────────
 0x00      4B       magic             "FGLK" (0x46 0x47 0x4C 0x4B)
 0x04      4B       version           1 (u32, little-endian)
 ─────────────────────────────────────────────────
-0x08      16B      entry[0]          第一个查找条目
-0x18      16B      entry[1]          第二个查找条目
+0x08      16B      entry[0]          First lookup entry
+0x18      16B      entry[1]          Second lookup entry
 ...
 ```
 
-每个查找条目（LookupEntry）固定 16 字节：
+Each lookup entry (LookupEntry) is a fixed 16 bytes:
 
 ```
-偏移      大小      字段              类型
+Offset    Size      Field             Type
 ─────────────────────────────────────────────────
-+0x00     8B       ngram_hash        u64, little-endian, FNV-1a 哈希值
-+0x08     4B       offset            u32, little-endian, postings 文件中的偏移
-+0x0C     4B       len               u32, little-endian, posting list 字节长度
++0x00     8B       ngram_hash        u64, little-endian, FNV-1a hash value
++0x08     4B       offset            u32, little-endian, offset into the postings file
++0x0C     4B       len               u32, little-endian, byte length of the posting list
 ```
 
-**关键设计决策**：
+**Key design decisions**:
 
-- 条目按 `ngram_hash` 升序排列，支持 O(log N) 二分查找
-- 使用 mmap 映射到内存，无需加载整个文件
-- 固定 16 字节条目大小使得随机访问成本为 O(1)
+- Entries are sorted in ascending order by `ngram_hash`, enabling O(log N) binary search
+- Memory-mapped via mmap, no need to load the entire file
+- Fixed 16-byte entry size makes random access O(1)
 
-### 2.2 index.postings — 倒排列表
+### 2.2 index.postings — Posting Lists
 
 ```
-偏移      大小      字段              说明
+Offset    Size      Field             Description
 ─────────────────────────────────────────────────
 0x00      4B       magic             "FGPS" (0x46 0x47 0x50 0x53)
 0x04      4B       version           1 (u32, little-endian)
 ─────────────────────────────────────────────────
-0x08      变长     posting_list[0]   第一个 trigram 的文件 ID 列表
-...       变长     posting_list[N]   第 N 个 trigram 的文件 ID 列表
+0x08      var      posting_list[0]   File ID list for the first trigram
+...       var      posting_list[N]   File ID list for the Nth trigram
 ```
 
-每个 posting list 的编码格式：
+Encoding format for each posting list:
 
 ```
 ┌─────────┬────────┬────────┬────────┬─────┐
@@ -126,11 +126,11 @@ fastgrep 是一个基于 trigram 倒排索引的快速正则搜索工具。核�
 └─────────┴────────┴────────┴────────┴─────┘
 ```
 
-- **count**: 列表中文件 ID 的数量
-- **delta₀**: 第一个文件 ID（即与 0 的差值）
-- **deltaᵢ**: 第 i 个文件 ID 与第 i-1 个的差值
+- **count**: Number of file IDs in the list
+- **delta₀**: The first file ID (i.e., the difference from 0)
+- **deltaᵢ**: The difference between the i-th file ID and the (i-1)-th
 
-**示例**：文件 ID 列表 `[5, 10, 20, 100, 1000]` 编码为：
+**Example**: The file ID list `[5, 10, 20, 100, 1000]` is encoded as:
 
 ```
 varint(5)     → count = 5
@@ -141,9 +141,9 @@ varint(80)    → delta₃ = 80      → file_id = 20 + 80 = 100
 varint(900)   → delta₄ = 900     → file_id = 100 + 900 = 1000
 ```
 
-### 2.3 index.meta — 元数据
+### 2.3 index.meta — Metadata
 
-JSON 格式，包含：
+JSON format, containing:
 
 ```json
 {
@@ -159,35 +159,35 @@ JSON 格式，包含：
 }
 ```
 
-`files` 数组的索引位置即为文件 ID。搜索时通过文件 ID 反查路径。
+The index position in the `files` array serves as the file ID. During search, the file ID is used to look up the path.
 
-### 2.4 磁盘空间占用分析
+### 2.4 Disk Space Usage Analysis
 
-以 2244 文件、14827 个唯一 trigram 的仓库为例：
+Using a repository with 2244 files and 14827 unique trigrams as an example:
 
-| 文件 | 计算 | 大小 |
+| File | Calculation | Size |
 |------|------|------|
 | index.lookup | 8B header + 14827 × 16B | ~231 KB |
 | index.postings | 8B header + Σ posting lists | ~184 KB |
-| index.meta | JSON（含文件路径列表） | ~数十 KB |
-| **合计** | | **~416 KB** |
+| index.meta | JSON (including file path list) | ~tens of KB |
+| **Total** | | **~416 KB** |
 
 ---
 
-## 3. Varint 编码
+## 3. Varint Encoding
 
-采用 LEB128（Little-Endian Base 128）变长整数编码，与 Protocol Buffers 使用的格式相同。
+Uses LEB128 (Little-Endian Base 128) variable-length integer encoding, the same format used by Protocol Buffers.
 
-### 3.1 编码规则
+### 3.1 Encoding Rules
 
-每个字节的最高位（bit 7）为**继续标志**：
-- `1` → 后面还有更多字节
-- `0` → 这是最后一个字节
+The most significant bit (bit 7) of each byte is the **continuation flag**:
+- `1` → more bytes follow
+- `0` → this is the last byte
 
-低 7 位承载实际数据，从低位到高位排列。
+The lower 7 bits carry the actual data, arranged from least significant to most significant.
 
 ```
-值            编码               字节数
+Value         Encoding           Bytes
 ───────────────────────────────────────
 0             0x00               1
 1             0x01               1
@@ -198,44 +198,44 @@ JSON 格式，包含：
 u32::MAX      0xFF 0xFF 0xFF 0xFF 0x0F   5
 ```
 
-### 3.2 编码过程示例
+### 3.2 Encoding Process Example
 
-以编码 300 为例：
-
-```
-300 的二进制:  100101100
-               ↓ 拆分为 7-bit 组
-低 7 位:   0101100  (0x2C)
-高 2 位:   10       (0x02)
-
-第一个字节: 0x2C | 0x80 = 0xAC  (有续字节)
-第二个字节: 0x02               (最后一个字节)
-
-结果: [0xAC, 0x02]
-```
-
-### 3.3 Delta 编码的压缩效果
-
-对于有序的文件 ID 序列，delta 编码将大数值转化为小差值，配合 varint 大幅缩减存储空间：
+Using 300 as an example:
 
 ```
-原始 ID:   [100, 105, 110, 200, 10000]
-Delta:     [100,   5,   5,  90,  9800]
+300 in binary:  100101100
+                ↓ Split into 7-bit groups
+Low 7 bits:   0101100  (0x2C)
+High 2 bits:  10       (0x02)
 
-原始存储:  5 × 4B = 20B  (固定 u32)
-Delta+Varint: ≈ 1 + 2 + 1 + 1 + 1 + 2 ≈ 8B  (60% 压缩)
+First byte:  0x2C | 0x80 = 0xAC  (continuation byte follows)
+Second byte: 0x02               (last byte)
+
+Result: [0xAC, 0x02]
+```
+
+### 3.3 Compression Effect of Delta Encoding
+
+For ordered file ID sequences, delta encoding converts large values into small differences, which combined with varint significantly reduces storage space:
+
+```
+Original IDs: [100, 105, 110, 200, 10000]
+Deltas:       [100,   5,   5,  90,  9800]
+
+Original storage:  5 × 4B = 20B  (fixed u32)
+Delta+Varint: ≈ 1 + 2 + 1 + 1 + 1 + 2 ≈ 8B  (60% compression)
 ```
 
 ---
 
-## 4. Trigram 提取与哈希
+## 4. Trigram Extraction and Hashing
 
-### 4.1 FNV-1a 哈希算法
+### 4.1 FNV-1a Hash Algorithm
 
-选择 FNV-1a 作为 trigram 哈希函数，原因：
-- 计算极快（仅 XOR + 乘法）
-- 对短输入（3 字节）分布均匀
-- 确定性（相同输入始终产生相同哈希）
+FNV-1a was chosen as the trigram hash function for the following reasons:
+- Extremely fast computation (only XOR + multiplication)
+- Uniform distribution for short inputs (3 bytes)
+- Deterministic (same input always produces the same hash)
 
 ```rust
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;  // 64-bit offset basis
@@ -245,89 +245,90 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET;
     for &b in bytes {
         hash ^= b as u64;                    // XOR
-        hash = hash.wrapping_mul(FNV_PRIME);  // 乘以质数
+        hash = hash.wrapping_mul(FNV_PRIME);  // Multiply by prime
     }
     hash
 }
 ```
 
-### 4.2 提取规则
+### 4.2 Extraction Rules
 
-从文件内容中提取 trigram 的规则：
+Rules for extracting trigrams from file contents:
 
-1. **滑动窗口**：大小为 3 字节，步长为 1
-2. **跳过换行**：任何包含 `\n`（0x0A）的 trigram 被丢弃
-3. **去重**：每个文件内相同哈希值只记录一次
-4. **最小长度**：内容不足 3 字节的文件不产生 trigram
+1. **Sliding window**: Size of 3 bytes, stride of 1
+2. **Skip newlines**: Any trigram containing `\n` (0x0A) is discarded
+3. **Deduplication**: Each unique hash value is recorded only once per file
+4. **Minimum length**: Files with fewer than 3 bytes produce no trigrams
 
 ```
-输入: "Hello\nWorld"
+Input: "Hello\nWorld"
 
-窗口遍历:
-  "Hel" → hash → ✓ 保留
-  "ell" → hash → ✓ 保留
-  "llo" → hash → ✓ 保留
-  "lo\n" → ✗ 含换行，跳过
-  "o\nW" → ✗ 含换行，跳过
-  "\nWo" → ✗ 含换行，跳过
-  "Wor" → hash → ✓ 保留
-  "orl" → hash → ✓ 保留
-  "rld" → hash → ✓ 保留
+Window traversal:
+  "Hel" → hash → ✓ Keep
+  "ell" → hash → ✓ Keep
+  "llo" → hash → ✓ Keep
+  "lo\n" → ✗ Contains newline, skip
+  "o\nW" → ✗ Contains newline, skip
+  "\nWo" → ✗ Contains newline, skip
+  "Wor" → hash → ✓ Keep
+  "orl" → hash → ✓ Keep
+  "rld" → hash → ✓ Keep
 
-结果: 6 个唯一 trigram
+Result: 6 unique trigrams
 ```
 
-### 4.3 为什么跳过换行 trigram
+### 4.3 Why Skip Newline Trigrams
 
-含换行的 trigram 几乎在所有文件中都出现（任何多行文件都有 `\n`），其 posting list 接近全集，对搜索无选择性价值。跳过它们可以：
-- 减少索引大小
-- 避免交集运算时的无效开销
+Trigrams containing newlines appear in nearly all files (any multi-line file contains `\n`), so their posting lists are close to the full set and have no selectivity value for search. Skipping them:
+- Reduces index size
+- Avoids wasted overhead during intersection operations
 
 ---
 
-## 5. 正则分解引擎
+## 5. Regex Decomposition Engine
 
-### 5.1 整体设计
+### 5.1 Overall Design
 
-使用 `regex-syntax` crate 将正则表达式解析为 HIR（High-level Intermediate Representation），然后递归遍历 HIR 树提取字面量子串，再从字面量中生成 trigram。
+Uses the `regex-syntax` crate to parse regular expressions into HIR (High-level Intermediate Representation), then recursively traverses the HIR tree to extract literal substrings, and finally generates trigrams from those literals.
 
 ```
-                正则表达式
+                Regular expression
                     │
           ┌─────────▼─────────┐
-          │  regex-syntax 解析  │
-          │  → HIR 树          │
+          │  regex-syntax parse│
+          │  → HIR tree        │
           └─────────┬─────────┘
                     │
           ┌─────────▼─────────┐
-          │  递归遍历 HIR       │
-          │  提取 LiteralInfo  │
+          │  Recursive HIR     │
+          │  traversal, extract│
+          │  LiteralInfo       │
           └─────────┬─────────┘
                     │
           ┌─────────▼──────────┐
-          │  字面量 → Trigram   │
-          │  生成 must_match /  │
-          │  alternatives      │
+          │  Literals → Trigram│
+          │  Generate must_match│
+          │  / alternatives    │
           └────────────────────┘
 ```
 
-### 5.2 HIR 节点处理规则
+### 5.2 HIR Node Processing Rules
 
-| HIR 节点 | 处理方式 | 产出 |
+| HIR Node | Processing | Output |
 |-----------|---------|------|
-| `Literal("abc")` | 直接提取 | `Exact("abc")` |
-| `Concat[a, b, c]` | 递归提取每部分的字面量 | `Conjunction([...])` |
-| `Alternation[a \| b]` | 提取每个分支，任一分支无字面量则放弃 | `Alternation([...])` |
-| `Capture(sub)` | 递归处理子模式 | 同子模式 |
-| `Repetition{min≥1}` | 递归处理子模式 | 同子模式 |
-| `Repetition{min=0}` | 不可优化 | `None` |
-| `Class`（字符类） | 不可优化 | `None` |
-| `Look`（断言） | 不可优化 | `None` |
-| `Empty` | 不可优化 | `None` |
+| `Literal("abc")` | Extract directly | `Exact("abc")` |
+| `Concat[a, b, c]` | Recursively extract literals from each part | `Conjunction([...])` |
+| `Alternation[a \| b]` | Extract each branch; abandon if any branch has no literals | `Alternation([...])` |
+| `Capture(sub)` | Recursively process sub-pattern | Same as sub-pattern |
+| `Repetition{min≥1}` | Recursively process sub-pattern | Same as sub-pattern |
+| `Repetition{min=0}` | Cannot be optimized | `None` |
+| `Class` (character class) | Cannot be optimized | `None` |
+| `Look` (assertion) | Cannot be optimized | `None` |
+| `Empty` | Cannot be optimized | `None` |
 
-### 5.3 分解示例
+### 5.3 Decomposition Examples
 
-**示例 1：纯字面量**
+**Example 1: Pure literal**
 ```
 "HashMap"
   → HIR: Literal("HashMap")
@@ -336,7 +337,7 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
                = [hash("Has"), hash("ash"), hash("shM"), hash("hMa"), hash("Map")]
 ```
 
-**示例 2：拼接含通配**
+**Example 2: Concatenation with wildcard**
 ```
 r"impl\s+Display"
   → HIR: Concat[Literal("impl"), Repetition{Class(\s), min=1}, Literal("Display")]
@@ -346,7 +347,7 @@ r"impl\s+Display"
                   hash("spl"), hash("pla"), hash("lay")]
 ```
 
-**示例 3：Alternation**
+**Example 3: Alternation**
 ```
 r"(TODO|FIXME|HACK)"
   → HIR: Alternation[Literal("TODO"), Literal("FIXME"), Literal("HACK")]
@@ -357,21 +358,21 @@ r"(TODO|FIXME|HACK)"
     ]
 ```
 
-**示例 4：不可优化**
+**Example 4: Not optimizable**
 ```
 r".*"
   → HIR: Repetition{Class(.), min=0}
   → None
-  → optimizable = false → 回退全扫描
+  → optimizable = false → full scan fallback
 ```
 
-### 5.4 Alternation 的查询语义
+### 5.4 Query Semantics for Alternation
 
-对于 alternation `(A|B|C)`：
+For an alternation `(A|B|C)`:
 
-1. 每个分支独立计算 trigram 交集（conjunction）
-2. 各分支结果取并集（union）
-3. 与 must_match 的结果再取交集
+1. Each branch independently computes its trigram intersection (conjunction)
+2. The results from all branches are combined via union
+3. The union is then intersected with the must_match results
 
 ```
 candidates = (files_matching_A ∪ files_matching_B ∪ files_matching_C) ∩ files_matching_must
@@ -379,47 +380,47 @@ candidates = (files_matching_A ∪ files_matching_B ∪ files_matching_C) ∩ fi
 
 ---
 
-## 6. 查询计划优化
+## 6. Query Plan Optimization
 
-### 6.1 选择性排序
+### 6.1 Selectivity Sorting
 
-并非所有 trigram 的过滤效果相同。常见 trigram（如 `the`）的 posting list 可能包含大量文件，而稀有 trigram（如 `Dis`）的 posting list 很短。
+Not all trigrams have the same filtering effectiveness. Common trigrams (e.g., `the`) may have posting lists containing many files, while rare trigrams (e.g., `Dis`) have short posting lists.
 
-查询计划器从索引中读取每个 trigram posting list 的字节长度（`len` 字段），按升序排列：
+The query planner reads the byte length (`len` field) of each trigram's posting list from the index and sorts them in ascending order:
 
 ```
 trigrams = [hash("Dis"), hash("imp"), hash("lay"), hash("mpl"), ...]
                  ↓              ↓            ↓           ↓
 posting size:    42B           128B         256B         312B
 
-排序后:
+After sorting:
 ordered = [hash("Dis"), hash("imp"), hash("lay"), hash("mpl")]
 ```
 
-**优势**：最稀有的 trigram 先查，交集结果最小 → 后续交集运算数据量极小。
+**Advantage**: The rarest trigram is looked up first, producing the smallest intersection result → subsequent intersection operations work on minimal data.
 
-### 6.2 早期终止
+### 6.2 Early Termination
 
-在交集运算过程中，如果任何一步结果为空，立即返回：
+During intersection operations, if the result becomes empty at any step, return immediately:
 
 ```rust
 for &hash in &plan.ordered_trigrams {
     let posting_list = reader.lookup(hash)?;
-    // ↓ 如果某 trigram 不在索引中 → 不可能有匹配
+    // ↓ If a trigram is not in the index → no match is possible
     let posting_list = match reader.lookup(hash) {
         Some(list) => list,
-        None => return Vec::new(),  // 早期终止
+        None => return Vec::new(),  // Early termination
     };
     result = intersect(&current, &posting_list);
     if result.is_empty() {
-        return Vec::new();  // 早期终止
+        return Vec::new();  // Early termination
     }
 }
 ```
 
-### 6.3 Posting List 交集算法
+### 6.3 Posting List Intersection Algorithm
 
-采用经典的**双指针归并交集**（merge-join），时间复杂度 O(n + m)：
+Uses the classic **two-pointer merge-join intersection**, with time complexity O(n + m):
 
 ```rust
 fn intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
@@ -436,57 +437,126 @@ fn intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
 }
 ```
 
-前提：posting list 已按文件 ID 升序排列（构建时保证）。
+Prerequisite: Posting lists are sorted in ascending order by file ID (guaranteed at build time).
 
 ---
 
-## 7. 索引构建流程
+## 7. Index Build Pipeline
 
-### 7.1 完整管线
+### 7.1 Complete Pipeline
 
 ```
 ┌───────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│ 文件发现       │───▶│ 并行 Trigram 提取  │───▶│ 倒排索引构建      │
-│ (ignore crate) │    │ (rayon par_iter)  │    │ (BTreeMap)       │
+│ File discovery │───▶│ Parallel trigram  │───▶│ Inverted index   │
+│ (ignore crate) │    │ extraction       │    │ construction     │
+│                │    │ (rayon par_iter)  │    │ (BTreeMap)       │
 └───────────────┘    └──────────────────┘    └────────┬─────────┘
                                                       │
                      ┌──────────────────┐    ┌────────▼─────────┐
-                     │ Git HEAD 检测    │───▶│ 写入磁盘          │
+                     │ Git HEAD detect  │───▶│ Write to disk    │
                      │ (gix crate)      │    │ (lookup+postings │
                      └──────────────────┘    │  +meta)          │
                                              └──────────────────┘
 ```
 
-### 7.2 文件发现
+### 7.2 File Discovery
 
-使用 `ignore` crate（ripgrep 的底层遍历库），自动：
-- 解析 `.gitignore`、`.gitignore_global`、`.git/info/exclude`
-- 跳过隐藏文件
-- 跳过 `.git/` 和 `.fastgrep/` 目录
+Uses the `ignore` crate (ripgrep's underlying traversal library), which automatically:
+- Parses `.gitignore`, `.gitignore_global`, `.git/info/exclude`
+- Skips hidden files
+- Skips `.git/` and `.fastgrep/` directories
 
-返回按字典序排列的相对路径列表，数组索引即为文件 ID。
+Returns a lexicographically sorted list of relative paths, where the array index serves as the file ID.
 
-### 7.3 并行 Trigram 提取
+### 7.3 Large File Skipping
+
+To avoid unnecessary reading and trigram extraction for large files (e.g., logs, data files, build artifacts), the builder checks file size via `std::fs::metadata()` **before** reading the file contents:
+
+```rust
+const MAX_FILE_SIZE: u64 = 1_048_576; // 1 MB
+
+// Skip large files — check metadata BEFORE reading content
+if let Ok(meta) = std::fs::metadata(&full_path) {
+    if meta.len() > opts.max_file_size {
+        skipped_large.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+}
+```
+
+**Key design decisions**:
+
+- Default threshold `MAX_FILE_SIZE = 1 MB`, configurable via `BuildOptions.max_file_size`
+- The `metadata()` system call only retrieves file metadata without reading content, achieving zero I/O overhead for large files
+- A new `skipped_large` field in `BuildStats` reports the number of skipped large files
+
+### 7.4 Real-Time Progress Output
+
+During index construction, real-time progress feedback is provided via `AtomicUsize` counters:
+
+```rust
+let processed = AtomicUsize::new(0);
+let total = files.len();
+
+// Inside par_iter:
+let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
+if count % 500 == 0 || count == total {
+    eprint!("\r  Extracting trigrams... {}/{}", count, total);
+}
+```
+
+- Progress is output every 500 files (using `\r` carriage return to overwrite the same line)
+- Also outputs when the last file is processed, ensuring 100% completion is displayed
+- Uses `AtomicUsize` + `Ordering::Relaxed` to ensure thread safety in the parallel environment while minimizing synchronization overhead
+
+### 7.5 File ID Remapping
+
+Not all discovered files are indexed (binary files, large files, empty files, etc. are skipped). To avoid large gaps of unused sparse IDs in posting lists, the builder performs **ID remapping** after trigram extraction:
+
+```rust
+// Collect the file IDs that were actually indexed
+let mut indexed_file_ids: Vec<usize> = per_file_trigrams
+    .iter().map(|(id, _)| *id).collect();
+indexed_file_ids.sort_unstable();
+
+// Build old_id → new_id mapping (consecutive numbering)
+let mut id_remap: Vec<Option<u32>> = vec![None; files.len()];
+let mut indexed_files: Vec<String> = Vec::with_capacity(indexed_file_ids.len());
+for (new_id, &old_id) in indexed_file_ids.iter().enumerate() {
+    id_remap[old_id] = Some(new_id as u32);
+    indexed_files.push(files[old_id].clone());
+}
+```
+
+**Effect**:
+
+- The `files` array in `index.meta` only contains files that were actually indexed, excluding skipped binary/large files
+- File IDs in posting lists are consecutive and compact (0, 1, 2, ...), improving delta encoding efficiency
+- `file_count` and `indexed_count` are separated: the former is the total number of discovered files, the latter is the number of actually indexed files
+
+### 7.6 Parallel Trigram Extraction
 
 ```rust
 let per_file_trigrams: Vec<(usize, HashSet<u64>)> = files
-    .par_iter()           // Rayon 自动分配到所有 CPU 核心
+    .par_iter()           // Rayon automatically distributes across all CPU cores
     .enumerate()
     .filter_map(|(file_id, path)| {
         let data = fs::read(full_path).ok()?;
 
-        // 二进制文件检测：前 8KB 含 null 字节则跳过
+        // Binary file detection: skip if first 8KB contains null bytes
         if data[..8192.min(data.len())].contains(&0) {
             return None;
         }
 
-        let trigrams = extract_trigrams(&data);
+        let trigrams = extract_trigrams_with_folded(&data);
         Some((file_id, trigrams))
     })
     .collect();
 ```
 
-### 7.4 倒排索引构建
+Note: Currently uses `extract_trigrams_with_folded()` for trigram extraction, which stores both the original case and lowercase-normalized trigrams simultaneously to support index-accelerated case-insensitive search (see Section 9 for details).
+
+### 7.7 Inverted Index Construction
 
 ```rust
 let mut trigram_map: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
@@ -497,40 +567,40 @@ for (file_id, trigrams) in &per_file_trigrams {
     }
 }
 
-// 确保每个 posting list 有序且无重复
+// Ensure each posting list is sorted and deduplicated
 for list in trigram_map.values_mut() {
     list.sort_unstable();
     list.dedup();
 }
 ```
 
-使用 `BTreeMap` 而非 `HashMap`，确保输出的 lookup table 天然有序（按 hash 值排列），无需额外排序。
+Uses `BTreeMap` instead of `HashMap` to ensure the output lookup table is naturally ordered (sorted by hash value), eliminating the need for additional sorting.
 
-### 7.5 二进制文件检测
+### 7.8 Binary File Detection
 
-采用简单但有效的启发式方法：
+Uses a simple but effective heuristic:
 
-- 读取文件前 8192 字节
-- 如果包含 `0x00`（null 字节），判定为二进制文件
-- 二进制文件不参与索引
+- Read the first 8192 bytes of the file
+- If the data contains `0x00` (null byte), classify it as a binary file
+- Binary files are excluded from the index
 
-这种方法能正确识别图片、编译产物、字体等常见二进制格式，同时对文本文件无误判。
+This method correctly identifies common binary formats such as images, compiled artifacts, and fonts, while having no false positives for text files.
 
 ---
 
-## 8. 内存映射读取
+## 8. Memory-Mapped Reading
 
-### 8.1 为什么使用 mmap
+### 8.1 Why Use mmap
 
-| 方案 | 内存占用 | 启动时间 | 随机访问 |
+| Approach | Memory Usage | Startup Time | Random Access |
 |------|---------|---------|---------|
-| 全量加载到 Vec | O(文件大小) | 高（需读+解析） | O(1) |
-| 按需 seek+read | O(1) | 低 | 高（系统调用开销） |
-| **mmap** | **O(1)¹** | **低** | **O(1)** |
+| Full load into Vec | O(file size) | High (requires read + parse) | O(1) |
+| On-demand seek+read | O(1) | Low | High (system call overhead) |
+| **mmap** | **O(1)¹** | **Low** | **O(1)** |
 
-¹ 操作系统按需分页加载，实际物理内存占用远小于文件大小。
+¹ The OS loads pages on demand; actual physical memory usage is far less than the file size.
 
-### 8.2 二分查找实现
+### 8.2 Binary Search Implementation
 
 ```rust
 pub fn lookup(&self, ngram_hash: u64) -> Option<Vec<u32>> {
@@ -539,7 +609,7 @@ pub fn lookup(&self, ngram_hash: u64) -> Option<Vec<u32>> {
 
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        // 直接通过偏移量访问 mmap 内存
+        // Access mmap memory directly via offset
         let entry = self.read_lookup_entry(data, mid);
 
         match entry.ngram_hash.cmp(&ngram_hash) {
@@ -552,33 +622,87 @@ pub fn lookup(&self, ngram_hash: u64) -> Option<Vec<u32>> {
 }
 ```
 
-### 8.3 性能特征
+### 8.3 Performance Characteristics
 
-- **查找复杂度**：O(log N)，N = trigram 数量
-- **内存开销**：仅 mmap 描述符，OS 管理实际页面
-- **冷启动**：首次访问触发页面加载，后续访问走 page cache
-- **并发安全**：只读 mmap 天然线程安全
+- **Lookup complexity**: O(log N), where N = number of trigrams
+- **Memory overhead**: Only the mmap descriptor; the OS manages actual pages
+- **Cold start**: First access triggers page loading; subsequent accesses use the page cache
+- **Concurrency safety**: Read-only mmap is inherently thread-safe
 
 ---
 
-## 9. 大小写不敏感搜索
+## 9. Case-Insensitive Search
 
-### 9.1 当前策略
+### 9.1 Index Layer: Folded Trigram Storage
 
-由于 trigram 索引是**大小写敏感**的（`Has` ≠ `has`），case-insensitive 搜索无法利用索引：
+During index construction, the `extract_trigrams_with_folded()` function **stores both the original case and the lowercase-normalized versions** of the trigram hash for each 3-byte sliding window:
 
 ```rust
-let (candidate_ids, used_index) = if !opts.case_insensitive && decomposed.optimizable {
-    // 使用索引
-    ...
-} else {
-    // 回退全扫描
-    let all_ids: Vec<u32> = (0..total_files as u32).collect();
-    (all_ids, false)
-};
+pub fn extract_trigrams_with_folded(data: &[u8]) -> HashSet<u64> {
+    let mut trigrams = HashSet::new();
+    for window in data.windows(3) {
+        if window.contains(&b'\n') { continue; }
+        // Original case
+        trigrams.insert(fnv1a_hash(window));
+        // Lowercase normalized
+        let folded: [u8; 3] = [
+            window[0].to_ascii_lowercase(),
+            window[1].to_ascii_lowercase(),
+            window[2].to_ascii_lowercase(),
+        ];
+        trigrams.insert(fnv1a_hash(&folded));
+    }
+    trigrams
+}
 ```
 
-正则匹配时通过添加 `(?i)` 前缀实现大小写不敏感：
+For example, when a file contains `"HashMap"`, the index stores both:
+- Original trigrams: `hash("Has")`, `hash("ash")`, `hash("shM")`, `hash("hMa")`, `hash("Map")`
+- Folded trigrams: `hash("has")`, `hash("ash")`, `hash("shm")`, `hash("hma")`, `hash("map")`
+
+Since a `HashSet` is used, trigrams that are already lowercase (e.g., `"ash"`) are not stored redundantly.
+
+### 9.2 Query Layer: Folded Trigram Extraction
+
+The query decomposer `decompose()` accepts a `case_insensitive: bool` parameter and selects the appropriate trigram extraction function based on the flag:
+
+```rust
+pub fn decompose(pattern: &str, case_insensitive: bool) -> DecomposedQuery {
+    let extract_fn = if case_insensitive {
+        extract_literal_trigrams_folded  // Convert to lowercase first, then extract
+    } else {
+        extract_literal_trigrams         // Extract as-is
+    };
+    // ... Use extract_fn to extract must_match and alternatives
+}
+```
+
+The implementation of `extract_literal_trigrams_folded()` is very concise — it converts the literal to ASCII lowercase, then calls the standard extraction:
+
+```rust
+pub fn extract_literal_trigrams_folded(s: &str) -> Vec<u64> {
+    let lower = s.to_ascii_lowercase();
+    extract_literal_trigrams(&lower)
+}
+```
+
+### 9.3 Complete Flow
+
+```
+Search for "hashmap" (-i mode):
+  1. decompose("hashmap", case_insensitive=true)
+     → extract_literal_trigrams_folded("hashmap")
+     → trigrams of "hashmap": [hash("has"), hash("ash"), hash("shm"), hash("hma"), hash("map")]
+  2. Look up these folded trigrams in the index → hit (because the index already stores folded versions)
+  3. Obtain candidate file set (same index-accelerated path as case-sensitive search)
+  4. Run (?i)hashmap regex verification on candidate files
+```
+
+**Key improvement**: Case-insensitive search **no longer falls back to a full scan**; instead, it uses folded trigrams to take the index-accelerated path, achieving the same reduction ratio as case-sensitive search.
+
+### 9.4 Regex Verification
+
+Regardless of whether index acceleration is used, the regex matching phase always achieves case-insensitivity by prepending `(?i)`:
 
 ```rust
 let regex_pattern = if opts.case_insensitive {
@@ -588,42 +712,74 @@ let regex_pattern = if opts.case_insensitive {
 };
 ```
 
-### 9.2 未来优化方向
-
-可以通过以下方式支持索引加速的 case-insensitive 搜索：
-
-1. **归一化索引**：构建时对每个 trigram 做 lowercase 归一化，查询时同样归一化
-2. **多路查找**：对每个 trigram 生成所有大小写变体（2³ = 8 种），取并集
-3. **双索引**：同时维护原始和 lowercase 两套索引
-
 ---
 
-## 10. Git 集成与索引新鲜度
+## 10. Git Integration and Index Freshness
 
-### 10.1 新鲜度模型
+### 10.1 Freshness Model
 
 ```
-索引构建时记录 HEAD commit hash → index.meta.commit_hash
-搜索时比较 current HEAD vs stored commit
+At index build time, record the HEAD commit hash → index.meta.commit_hash
+At search time, compare current HEAD vs stored commit
 
-匹配   → 索引新鲜，直接使用
-不匹配 → 索引过期，需要重建
+Match     → Index is fresh, use directly
+Mismatch  → Index is stale, needs rebuilding
 ```
 
-### 10.2 自动重建流程
+#### 10.1.1 Non-Git Directory Handling
+
+For directories not in a Git repository, detection is done via `is_git_repo()`:
 
 ```rust
-// 在 search 命令中
-if auto_index && !is_index_fresh(root, reader.commit_hash()) {
-    eprintln!("Index is stale, rebuilding...");
-    build_index(&opts)?;
-    reader = IndexReader::open(root)?;  // 重新打开
+pub fn is_git_repo(root: &Path) -> bool {
+    gix::discover(root).is_ok()
 }
 ```
 
-### 10.3 变更检测
+When the directory is not a Git repository, `is_index_fresh()` always returns `true`, trusting the existing index:
 
-通过 `git diff-index` 和 `git ls-files` 检测变更：
+```rust
+pub fn is_index_fresh(root: &Path, stored_commit: Option<&str>) -> bool {
+    if !is_git_repo(root) {
+        return true;  // Cannot track freshness in non-Git directories; trust existing index
+    }
+    // ... Commit hash comparison logic for Git repositories
+}
+```
+
+Users can manually rebuild the index via `fastgrep index`.
+
+### 10.2 Auto-Rebuild and Delta Layer Integration
+
+The complete flow for the search command (`search.rs`):
+
+```rust
+// 1. Check index freshness, full rebuild if necessary
+if auto_index && !git::is_index_fresh(root, reader.commit_hash()) {
+    eprintln!("Index is stale, rebuilding...");
+    build_index(&opts)?;
+    reader = IndexReader::open(root)?;
+}
+
+// 2. Build the delta layer (overlay for uncommitted changes)
+let delta = build_delta_layer(root);
+
+// 3. Execute search (passing in the delta layer)
+execute_search(&reader, &search_opts, delta.as_ref())?;
+```
+
+`build_delta_layer()` first checks `is_git_repo(root)` — for non-Git directories, it returns `None` directly without attempting delta detection.
+
+The CLI uses the `--no-auto-index` flag (auto-indexing is enabled by default) to control whether automatic index building/refreshing is allowed:
+
+```
+fastgrep search "pattern"              # Default: auto-index + delta
+fastgrep search "pattern" --no-auto-index  # Skip auto-indexing
+```
+
+### 10.3 Change Detection
+
+Changes are detected via `git status --porcelain` and `git diff-index`:
 
 ```
 git diff-index --name-status <stored_commit>
@@ -635,30 +791,56 @@ git ls-files --others --exclude-standard
 → untracked_file.rs     (untracked)
 ```
 
-### 10.4 Delta 层设计
+### 10.4 Delta Layer Implementation
 
-`DeltaLayer` 为未提交变更提供覆盖层：
+`DeltaLayer` provides an overlay for uncommitted changes, **fully integrated into the search pipeline**:
 
 ```rust
 pub struct DeltaLayer {
-    // 新增/修改文件 → 重新提取的 trigram 集合
+    // Added/modified files → re-extracted trigram sets
     pub modified_trigrams: BTreeMap<String, HashSet<u64>>,
-    // 已删除文件的路径
+    // Paths of deleted files
     pub deleted_files: HashSet<String>,
 }
 ```
 
-查询时：
-1. 先查主索引获取候选
-2. 从候选中排除 `deleted_files`
-3. 在 `modified_trigrams` 中额外搜索新增/修改文件
-4. 合并结果
+`execute_search()` accepts an `Option<&DeltaLayer>` parameter. The search flow:
+
+1. **Main index query**: Normal trigram lookup to obtain the candidate file set
+2. **Exclude deleted files**: Filter out files in `delta.deleted_files` from the candidates
+3. **Search delta files**: Iterate over added/modified files in `delta.modified_trigrams` and perform additional search on files not already covered by the main index candidates
+4. **Merge results**: Combine results from the main index with delta search results
+
+```rust
+// Exclude deleted files
+let deleted_files: HashSet<&str> = match delta {
+    Some(d) => d.deleted_files.iter().map(|s| s.as_str()).collect(),
+    None => HashSet::new(),
+};
+
+// Skip deleted files during main index search
+for &file_id in &candidate_ids {
+    let rel_path = reader.file_path(file_id)?;
+    if deleted_files.contains(rel_path) { continue; }
+    // ... Execute regex verification
+}
+
+// Delta layer: search added/modified files
+if let Some(delta) = delta {
+    for path in delta.modified_trigrams.keys() {
+        if searched_files.contains(path.as_str()) { continue; }
+        // ... Execute regex verification on delta files
+    }
+}
+```
+
+`SearchResult` includes a `delta_files` field that reports the number of files additionally searched via the delta layer.
 
 ---
 
-## 11. 上下文行处理
+## 11. Context Line Handling
 
-### 11.1 算法
+### 11.1 Algorithm
 
 ```rust
 fn search_file(path, rel_path, regex, before_ctx, after_ctx) -> Vec<SearchMatch> {
@@ -667,34 +849,34 @@ fn search_file(path, rel_path, regex, before_ctx, after_ctx) -> Vec<SearchMatch>
 
     for (i, line) in lines.iter().enumerate() {
         if regex.is_match(line) {
-            // 1. 添加 before-context
+            // 1. Add before-context
             for ctx_i in i.saturating_sub(before_ctx)..i {
-                if context_lines_added.insert(ctx_i) { /* 添加 */ }
+                if context_lines_added.insert(ctx_i) { /* add */ }
             }
 
-            // 2. 添加匹配行自身
-            if context_lines_added.insert(i) { /* 添加 */ }
+            // 2. Add the matching line itself
+            if context_lines_added.insert(i) { /* add */ }
 
-            // 3. 添加 after-context
+            // 3. Add after-context
             for ctx_i in (i+1)..(i+after_ctx+1).min(lines.len()) {
-                if context_lines_added.insert(ctx_i) { /* 添加 */ }
+                if context_lines_added.insert(ctx_i) { /* add */ }
             }
         }
     }
 }
 ```
 
-### 11.2 去重机制
+### 11.2 Deduplication Mechanism
 
-使用 `HashSet<usize>` 跟踪已添加的行号。当多个匹配行的上下文重叠时，确保每行只输出一次。
+A `HashSet<usize>` tracks which line numbers have already been added. When context lines from multiple matches overlap, this ensures each line is output only once.
 
 ---
 
-## 12. 文件过滤
+## 12. File Filtering
 
-### 12.1 文件类型过滤 (`-t`)
+### 12.1 File Type Filtering (`-t`)
 
-在候选文件上按扩展名过滤：
+Filters candidates by extension:
 
 ```rust
 if let Some(ref ft) = file_type {
@@ -705,11 +887,11 @@ if let Some(ref ft) = file_type {
 }
 ```
 
-示例：`-t rs` 仅保留 `.rs` 文件。
+Example: `-t rs` keeps only `.rs` files.
 
-### 12.2 Glob 过滤 (`-g`)
+### 12.2 Glob Filtering (`-g`)
 
-使用 `globset` crate 进行 glob 匹配：
+Uses the `globset` crate for glob matching:
 
 ```rust
 let glob_matcher = globset::Glob::new(pattern)?.compile_matcher();
@@ -718,36 +900,36 @@ if !glob_matcher.is_match(path) {
 }
 ```
 
-示例：`-g "*.tsx"` 仅保留 `.tsx` 文件。
+Example: `-g "*.tsx"` keeps only `.tsx` files.
 
-### 12.3 过滤时机
+### 12.3 Filtering Timing
 
-过滤在索引查找**之后**、全文验证**之前**执行，减少不必要的文件 I/O：
+Filtering is executed **after** the index lookup and **before** full-text verification, reducing unnecessary file I/O:
 
 ```
-索引查找 → 候选 ID 列表 → 类型/Glob 过滤 → 精简候选 → 全文 regex 验证
+Index lookup → candidate ID list → type/glob filtering → refined candidates → full regex verification
 ```
 
 ---
 
-## 13. 权重系统（Sparse N-gram 预留）
+## 13. Weight System (Sparse N-gram Reserved)
 
-### 13.1 字符对频率表
+### 13.1 Byte-Pair Frequency Table
 
 ```rust
 pub struct PairFrequencyTable {
-    counts: Vec<u64>,   // 256 × 256 = 65536 项
+    counts: Vec<u64>,   // 256 × 256 = 65536 entries
     total: u64,
 }
 ```
 
-从语料中统计所有相邻字节对的出现频次。
+Computes the occurrence frequency of all adjacent byte pairs from a corpus.
 
-### 13.2 选择性评分
+### 13.2 Selectivity Scoring
 
 ```rust
 pub fn ngram_selectivity(&self, bytes: &[u8]) -> f64 {
-    // 取 n-gram 中所有字节对频率的最小值（瓶颈法）
+    // Take the minimum frequency among all byte pairs in the n-gram (bottleneck method)
     bytes.windows(2)
         .map(|w| self.frequency(w[0], w[1]))
         .min_by(|a, b| a.partial_cmp(b).unwrap())
@@ -755,9 +937,9 @@ pub fn ngram_selectivity(&self, bytes: &[u8]) -> f64 {
 }
 ```
 
-最小频率对决定了整个 n-gram 的选择性：频率越低 → 越稀有 → 过滤效果越好。
+The minimum-frequency pair determines the selectivity of the entire n-gram: lower frequency → rarer → better filtering effectiveness.
 
-### 13.3 CRC32 权重
+### 13.3 CRC32 Weight
 
 ```rust
 pub fn crc32_weight(pair: &[u8; 2]) -> u32 {
@@ -767,120 +949,140 @@ pub fn crc32_weight(pair: &[u8; 2]) -> u32 {
 }
 ```
 
-用于 sparse n-gram 选择：对较长的字面量，不需要提取所有 trigram，而是选择 CRC32 权重最高（预估最稀有）的变长 n-gram 子集。此功能已预留接口，当前 MVP 使用固定 trigram。
+Used for sparse n-gram selection: for longer literals, instead of extracting all trigrams, a subset of variable-length n-grams with the highest CRC32 weight (estimated to be the rarest) is selected. This feature has a reserved interface; the current MVP uses fixed trigrams.
 
 ---
 
-## 14. 输出格式化
+## 14. Output Formatting
 
-### 14.1 终端颜色检测
+### 14.1 Terminal Color Detection
 
 ```rust
 fn supports_color() -> bool {
     if std::env::var("NO_COLOR").is_ok() {
-        return false;        // 尊重 NO_COLOR 协议
+        return false;        // Respect the NO_COLOR protocol
     }
     std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
 ```
 
-- 尊重 [NO_COLOR](https://no-color.org/) 环境变量
-- 使用 Rust 标准库 `IsTerminal` trait 检测 stdout 是否连接 TTY
+- Respects the [NO_COLOR](https://no-color.org/) environment variable
+- Uses the Rust standard library `IsTerminal` trait to detect whether stdout is connected to a TTY
 
-### 14.2 ANSI 颜色方案
+### 14.2 ANSI Color Scheme
 
-| 元素 | ANSI 序列 | 颜色 |
+| Element | ANSI Sequence | Color |
 |------|-----------|------|
-| 文件名 | `\x1b[35m...\x1b[0m` | 洋红 |
-| 行号 | `\x1b[32m...\x1b[0m` | 绿色 |
-| 匹配内容 | 无特殊着色 | 默认 |
+| Filename | `\x1b[35m...\x1b[0m` | Magenta |
+| Line number | `\x1b[32m...\x1b[0m` | Green |
+| Match content | No special coloring | Default |
 
-与 ripgrep 的颜色方案保持一致。
+Consistent with ripgrep's color scheme.
 
 ---
 
-## 15. 性能分析
+## 15. Performance Analysis
 
-### 15.1 理论复杂度
+### 15.1 Theoretical Complexity
 
-| 操作 | 时间复杂度 | 说明 |
+| Operation | Time Complexity | Description |
 |------|-----------|------|
-| 索引构建 | O(F × L) | F = 文件数, L = 平均文件长度 |
-| Trigram 查找 | O(log N) | N = 唯一 trigram 数 |
-| Posting 解码 | O(P) | P = posting list 长度 |
-| k 个 Trigram 交集 | O(k × P_min) | P_min = 最小 posting list 大小 |
-| 全文验证 | O(C × L) | C = 候选文件数, L = 文件长度 |
+| Index construction | O(F × L) | F = number of files, L = average file length |
+| Trigram lookup | O(log N) | N = number of unique trigrams |
+| Posting decoding | O(P) | P = posting list length |
+| Intersection of k trigrams | O(k × P_min) | P_min = size of smallest posting list |
+| Full-text verification | O(C × L) | C = number of candidate files, L = file length |
 
-### 15.2 实际测试数据
+### 15.2 Actual Test Data
 
-在 fastgrep 自身仓库（2244 文件）上的搜索：
+Search results on fastgrep's own repository (2244 files):
 
-| 模式 | 候选/总计 | 缩减比 |
+| Pattern | Candidates/Total | Reduction Ratio |
 |------|----------|--------|
 | `"HashMap"` | 6 / 2244 | 374× |
 | `"impl.*Display"` | 4 / 2244 | 561× |
-| `".*"`（不可优化） | 2244 / 2244 | 1×（全扫描） |
+| `".*"` (not optimizable) | 2244 / 2244 | 1× (full scan) |
 
-### 15.3 Release 构建优化
+### 15.3 Release Build Optimization
 
 ```toml
 [profile.release]
-lto = true          # 跨 crate 链接时优化
-codegen-units = 1   # 单编译单元，更激进优化
-strip = true        # 剥离调试符号，缩小二进制
+lto = true          # Cross-crate link-time optimization
+codegen-units = 1   # Single codegen unit for more aggressive optimization
+strip = true        # Strip debug symbols to reduce binary size
 ```
 
 ---
 
-## 16. 测试策略
+## 16. Testing Strategy
 
-### 16.1 测试分层
+### 16.1 Test Layering
 
-| 层级 | 数量 | 覆盖范围 |
+| Level | Count | Coverage |
 |------|------|---------|
-| 单元测试 | 19 | 哈希确定性、varint 编解码、格式序列化、trigram 提取、查询分解 |
-| 集成测试 | 7 | 端到端构建+搜索、正则、alternation、大小写、文件过滤、上下文行、全扫描回退 |
-| **合计** | **26** | |
+| Unit tests | 20 | Hash determinism, varint encode/decode, format serialization, trigram extraction, query decomposition, case-insensitive decomposition |
+| Integration tests | 9 | End-to-end build + search, regex, alternation, case sensitivity, file filtering, context lines, full scan fallback, delta layer added files, delta layer deleted file exclusion |
+| **Total** | **29** | |
 
-### 16.2 关键测试用例
+### 16.2 Key Test Cases
 
-**varint 边界值测试**：
+**Varint boundary value tests**:
 ```rust
 for &val in &[0, 1, 127, 128, 300, 16384, u32::MAX] {
     assert_eq!(decode(encode(val)), val);
 }
 ```
 
-**索引缩减效果验证**：
+**Index reduction effectiveness verification**:
 ```rust
 assert!(result.candidate_count < result.total_files,
     "index should narrow candidates");
 ```
 
-**全扫描回退验证**：
+**Full scan fallback verification**:
 ```rust
-// r".*" 不可优化，必须全扫描
+// r".*" is not optimizable, must fall back to full scan
 assert!(!result.used_index);
 assert_eq!(result.candidate_count, result.total_files);
 ```
 
-### 16.3 测试语料
+**Delta layer added file test**:
+```rust
+// After index build, a newly added file is not found without the delta layer
+let result = execute_search(&reader, &search_opts, None).unwrap();
+assert!(result.matches.is_empty());
 
-集成测试使用 `tempfile` 在临时目录中创建 4 个测试文件（Rust、Python、文本），验证跨语言搜索的正确性。
+// The new file can be found via the delta layer
+let delta = DeltaLayer::from_changed_files(root, &["new_feature.rs".to_string()], &[]).unwrap();
+let result = execute_search(&reader, &search_opts, Some(&delta)).unwrap();
+assert!(!result.matches.is_empty());
+```
+
+**Delta layer deleted file exclusion test**:
+```rust
+// After deleting a file, the delta layer excludes it from results
+let delta = DeltaLayer::from_changed_files(root, &[], &["notes.txt".to_string()]).unwrap();
+let result = execute_search(&reader, &search_opts, Some(&delta)).unwrap();
+assert!(!result.matches.iter().any(|m| m.file == "notes.txt"));
+```
+
+### 16.3 Test Corpus
+
+Integration tests use `tempfile` to create 4 test files (Rust, Python, text) in a temporary directory, verifying the correctness of cross-language search.
 
 ---
 
-## 17. 压测框架
+## 17. Benchmark Framework
 
-### 17.1 测试矩阵
+### 17.1 Test Matrix
 
-| 维度 | 取值 |
+| Dimension | Values |
 |------|------|
-| 语料 | small（100 文件）、medium（10k 文件）、linux-kernel |
-| 模式类型 | 字面量（常见/稀有/中等）、正则（函数声明/import/impl trait/TODO）、不可优化 |
-| 迭代次数 | 可配置，默认 10 次取中位数 |
+| Corpus | small (100 files), medium (10k files), linux-kernel |
+| Pattern type | Literal (common/rare/medium), regex (function declaration/import/impl trait/TODO), not optimizable |
+| Iterations | Configurable, default 10 iterations taking the median |
 
-### 17.2 测试模式
+### 17.2 Test Patterns
 
 ```
 literal_common:     "fn"
@@ -893,9 +1095,9 @@ regex_todo:         r"(TODO|FIXME|HACK)\b"
 regex_dot_star:     ".*"
 ```
 
-### 17.3 输出格式
+### 17.3 Output Format
 
-CSV 原始数据 + Markdown 报告表格：
+CSV raw data + Markdown report tables:
 
 ```
 | Pattern          | rg (ms) | fastgrep (ms) | Speedup | Matches |
@@ -907,18 +1109,18 @@ CSV 原始数据 + Markdown 报告表格：
 
 ---
 
-## 18. 未来演进方向
+## 18. Future Evolution Directions
 
-### Phase 2: 性能优化
-- [ ] Sparse n-gram：基于字符对频率选择变长 n-gram
-- [ ] 完整 regex AST 遍历（当前仅处理 Literal/Concat/Alternation）
-- [ ] 索引加速的 case-insensitive 搜索（lowercase 归一化索引）
+### Phase 2: Performance Optimization
+- [ ] Sparse n-gram: Select variable-length n-grams based on byte-pair frequency
+- [ ] Complete regex AST traversal (currently only handles Literal/Concat/Alternation)
+- [x] ~~Index-accelerated case-insensitive search (lowercase-normalized index)~~ ✅ Done: Stores folded trigrams at build time, uses folded extraction at query time
 
-### Phase 3: 增量更新
-- [ ] Delta 层实际集成到搜索管线
-- [ ] 增量索引更新（仅处理变更文件，避免全量重建）
+### Phase 3: Incremental Updates
+- [x] ~~Delta layer actually integrated into the search pipeline~~ ✅ Done: `execute_search` accepts `Option<&DeltaLayer>`, excludes deleted files, searches added/modified files
+- [ ] Incremental index updates (process only changed files, avoiding full rebuilds)
 
-### Phase 4: Agent 深度集成
-- [ ] MCP Server 模式（常驻进程，避免重复 mmap 开销）
-- [ ] 搜索结果排名（按相关性排序）
-- [ ] 并行多模式搜索（一次查询多个 pattern）
+### Phase 4: Agent Deep Integration
+- [ ] MCP Server mode (persistent process, avoiding repeated mmap overhead)
+- [ ] Search result ranking (sorted by relevance)
+- [ ] Parallel multi-pattern search (query multiple patterns at once)
