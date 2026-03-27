@@ -18,14 +18,16 @@ $ fastgrep search "HashMap"
 ### Installation
 
 ```bash
-# Build and install from source
-cd /path/to/fastgrep
-bash scripts/install.sh
+# One-line install (builds binary + installs Claude Code skill)
+git clone https://github.com/user/fastgrep && cd fastgrep && bash install.sh
 
-# Or build manually
-cargo build --release -p fastgrep-cli
-cp target/release/fastgrep ~/.local/bin/
+# Or if you already cloned the repo
+bash install.sh
 ```
+
+This will:
+1. Build `fastgrep` and `fastgrep-bench` binaries → `~/.local/bin/`
+2. Install the Claude Code skill → `~/.claude/skills/fastgrep/SKILL.md`
 
 Make sure `~/.local/bin` is in your `$PATH`.
 
@@ -173,7 +175,7 @@ Default behavior (auto-index enabled; disable with `--no-auto-index`):
 
 **Freshness model:**
 - **Git repositories**: freshness is determined by comparing the current HEAD commit hash against the one stored in the index. When the index is fresh but there are uncommitted changes, a delta overlay layer is applied to cover those changes.
-- **Non-git directories**: the existing index is trusted as-is. Rebuild manually with `fastgrep index` when the directory contents change.
+- **Non-git directories**: the index records a build timestamp. At search time, files with mtime newer than the build timestamp are detected and searched via a delta overlay layer. Deleted files are also detected and excluded from results.
 
 ```bash
 # Don't want automatic indexing? Manage it manually:
@@ -195,10 +197,13 @@ fastgrep search "pattern" --no-auto-index
 
 ## Using as a Claude Code Skill
 
-### Install the Skill
+The skill is automatically installed when you run `bash install.sh`. It is placed at `~/.claude/skills/fastgrep/SKILL.md` so Claude Code can use `/fastgrep` globally in any project.
+
+To install the skill only (without building the binary):
 
 ```bash
-cp skill/fastgrep.md ~/.claude/skills/
+mkdir -p ~/.claude/skills/fastgrep
+cp .claude/skills/fastgrep/SKILL.md ~/.claude/skills/fastgrep/
 ```
 
 Once installed, Claude Code can prefer `fastgrep search` over `rg` when searching large codebases.
@@ -295,8 +300,9 @@ fastgrep/
 │   │   ├── cmd/{index,search,status}.rs
 │   │   └── output.rs                 #   Output formatting
 │   └── fastgrep-bench/src/           # Benchmark tool
-├── skill/fastgrep.md                 # Claude Code Skill definition
-└── scripts/install.sh                # Install script
+├── install.sh                        # One-line install entry point
+├── scripts/install.sh                # Full install (build + skill)
+└── .claude/skills/fastgrep/SKILL.md  # Claude Code Skill definition
 ```
 
 ## Dependencies

@@ -734,18 +734,38 @@ pub fn is_git_repo(root: &Path) -> bool {
 }
 ```
 
-当目录不是 Git 仓库时，`is_index_fresh()` 始终返回 `true`，信任已有索引：
+当目录不是 Git 仓库时，`is_index_fresh()` 始终返回 `true`，信任已有索引。但通过 **基于 mtime 的 Delta 检测** 来捕获搜索间隔中的文件变更。
+
+索引构建时，将 `SystemTime::now()` 记录为 `build_timestamp`（epoch 秒数）存入 `index.meta`。搜索时，`detect_fs_changes()` 遍历目录并：
+- mtime > build_timestamp 的文件 → 视为新增/修改
+- 索引中有但磁盘上不存在的文件 → 视为已删除
 
 ```rust
-pub fn is_index_fresh(root: &Path, stored_commit: Option<&str>) -> bool {
-    if !is_git_repo(root) {
-        return true;  // 非 Git 目录无法追踪新鲜度，信任现有索引
+pub fn detect_fs_changes(
+    root: &Path,
+    indexed_files: &[String],
+    build_timestamp: u64,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let build_time = UNIX_EPOCH + Duration::from_secs(build_timestamp);
+
+    // 遍历目录，stat 每个文件
+    for entry in walker {
+        if entry.metadata()?.modified()? > build_time {
+            modified.push(rel_path);
+        }
+        current_files.insert(rel_path);
     }
-    // ... Git 仓库的 commit hash 比较逻辑
+
+    // 检测已删除文件
+    let deleted = indexed_files.iter()
+        .filter(|f| !current_files.contains(f.as_str()))
+        .collect();
+
+    Ok((modified, deleted))
 }
 ```
 
-用户可通过 `fastgrep index` 手动重建索引。
+这种方式非常轻量——`stat()` 比 `read()` 开销小得多。只有变更的文件才会被读取内容，通过现有的 `DeltaLayer` 进行搜索。
 
 ### 10.2 自动重建与 Delta 层集成
 
@@ -766,7 +786,9 @@ let delta = build_delta_layer(root);
 execute_search(&reader, &search_opts, delta.as_ref())?;
 ```
 
-`build_delta_layer()` 首先检查 `is_git_repo(root)`——非 Git 目录直接返回 `None`，不尝试 delta 检测。
+`build_delta_layer()` 根据目录类型分支处理：
+- **Git 仓库**：使用 `git status`/`git diff-index` 进行 delta 检测（行为不变）
+- **非 Git 目录**：调用 `detect_fs_changes()`，传入索引的 `build_timestamp` 和文件列表，然后从结果构建 `DeltaLayer`
 
 CLI 使用 `--no-auto-index` 标志（默认自动索引开启）来控制是否允许自动构建/刷新索引：
 
@@ -1105,9 +1127,9 @@ fn read_lookup_entry(&self, data: &[u8], index: usize) -> LookupEntry {
 | 层级 | 数量 | 覆盖范围 |
 |------|------|---------|
 | 单元测试 | 20 | 哈希确定性、varint 编解码、格式序列化、trigram 提取、查询分解、大小写不敏感分解 |
-| 集成测试 | 9 | 端到端构建+搜索、正则、alternation、大小写、文件过滤、上下文行、全扫描回退、Delta 层新增文件、Delta 层删除文件排除 |
+| 集成测试 | 10 | 端到端构建+搜索、正则、alternation、大小写、文件过滤、上下文行、全扫描回退、Delta 层新增文件、Delta 层删除文件排除、非 Git 目录 mtime Delta 检测 |
 | 正确性测试 | 6 | 24 种模式逐行对比 naive grep、无漏匹配验证、大小写不敏感准确性、上下文行正确性、文件类型过滤正确性、边界情况 |
-| **合计** | **35** | |
+| **合计** | **36** | |
 
 ### 16.2 关键测试用例
 
@@ -1206,6 +1228,7 @@ CSV 原始数据 + Markdown 报告表格：
 
 ### Phase 3: 增量更新
 - [x] ~~Delta 层实际集成到搜索管线~~ ✅ 已完成：`execute_search` 接受 `Option<&DeltaLayer>`，排除删除文件、搜索新增/修改文件
+- [x] ~~非 Git 目录基于文件系统 mtime 的 Delta 检测~~ ✅ 已完成：在 `index.meta` 中记录 `build_timestamp`，搜索时遍历目录检测新增/修改/删除文件
 - [ ] 增量索引更新（仅处理变更文件，避免全量重建）
 
 ### Phase 4: Agent 深度集成

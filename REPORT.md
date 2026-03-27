@@ -736,18 +736,38 @@ pub fn is_git_repo(root: &Path) -> bool {
 }
 ```
 
-When the directory is not a Git repository, `is_index_fresh()` always returns `true`, trusting the existing index:
+When the directory is not a Git repository, `is_index_fresh()` always returns `true`, trusting the existing index. However, **mtime-based delta detection** is used to catch file changes between searches.
+
+At index build time, `SystemTime::now()` is recorded as `build_timestamp` (epoch seconds) in `index.meta`. At search time, `detect_fs_changes()` walks the directory and:
+- Files with mtime > build_timestamp → treated as modified/new
+- Indexed files missing from disk → treated as deleted
 
 ```rust
-pub fn is_index_fresh(root: &Path, stored_commit: Option<&str>) -> bool {
-    if !is_git_repo(root) {
-        return true;  // Cannot track freshness in non-Git directories; trust existing index
+pub fn detect_fs_changes(
+    root: &Path,
+    indexed_files: &[String],
+    build_timestamp: u64,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let build_time = UNIX_EPOCH + Duration::from_secs(build_timestamp);
+
+    // Walk directory, stat each file
+    for entry in walker {
+        if entry.metadata()?.modified()? > build_time {
+            modified.push(rel_path);
+        }
+        current_files.insert(rel_path);
     }
-    // ... Commit hash comparison logic for Git repositories
+
+    // Detect deletions
+    let deleted = indexed_files.iter()
+        .filter(|f| !current_files.contains(f.as_str()))
+        .collect();
+
+    Ok((modified, deleted))
 }
 ```
 
-Users can manually rebuild the index via `fastgrep index`.
+This is lightweight — `stat()` is much cheaper than `read()`. Only the changed files have their content read and searched via the existing `DeltaLayer`.
 
 ### 10.2 Auto-Rebuild and Delta Layer Integration
 
@@ -768,7 +788,9 @@ let delta = build_delta_layer(root);
 execute_search(&reader, &search_opts, delta.as_ref())?;
 ```
 
-`build_delta_layer()` first checks `is_git_repo(root)` — for non-Git directories, it returns `None` directly without attempting delta detection.
+`build_delta_layer()` branches based on the directory type:
+- **Git repo**: uses `git status`/`git diff-index` for delta detection (unchanged)
+- **Non-git directory**: calls `detect_fs_changes()` with the index's `build_timestamp` and file list, then builds a `DeltaLayer` from the result
 
 The CLI uses the `--no-auto-index` flag (auto-indexing is enabled by default) to control whether automatic index building/refreshing is allowed:
 
@@ -1155,9 +1177,9 @@ With all files in page cache, rg scans 92k files in ~160ms. fastgrep's process s
 | Level | Count | Coverage |
 |------|------|---------|
 | Unit tests | 20 | Hash determinism, varint encode/decode, format serialization, trigram extraction, query decomposition, case-insensitive decomposition |
-| Integration tests | 9 | End-to-end build + search, regex, alternation, case sensitivity, file filtering, context lines, full scan fallback, delta layer added files, delta layer deleted file exclusion |
+| Integration tests | 10 | End-to-end build + search, regex, alternation, case sensitivity, file filtering, context lines, full scan fallback, delta layer added files, delta layer deleted file exclusion, non-git mtime delta detection |
 | Correctness tests | 6 | 24 patterns against naive grep line-by-line comparison, no false negatives verification, case-insensitive accuracy, context line correctness, file type filter correctness, edge case patterns |
-| **Total** | **35** | |
+| **Total** | **36** | |
 
 ### 16.2 Key Test Cases
 
@@ -1256,6 +1278,7 @@ CSV raw data + Markdown report tables:
 
 ### Phase 3: Incremental Updates
 - [x] ~~Delta layer actually integrated into the search pipeline~~ ✅ Done: `execute_search` accepts `Option<&DeltaLayer>`, excludes deleted files, searches added/modified files
+- [x] ~~Non-git directory delta detection via filesystem mtime~~ ✅ Done: Records `build_timestamp` in `index.meta`, walks directory at search time to detect new/modified/deleted files
 - [ ] Incremental index updates (process only changed files, avoiding full rebuilds)
 
 ### Phase 4: Agent Deep Integration

@@ -18,14 +18,16 @@ $ fastgrep search "HashMap"
 ### 安装
 
 ```bash
-# 从源码构建并安装
-cd /path/to/fastgrep
-bash scripts/install.sh
+# 一键安装（编译二进制 + 安装 Claude Code skill）
+git clone https://github.com/user/fastgrep && cd fastgrep && bash install.sh
 
-# 或手动构建
-cargo build --release -p fastgrep-cli
-cp target/release/fastgrep ~/.local/bin/
+# 如果已经克隆了仓库
+bash install.sh
 ```
+
+这会：
+1. 编译 `fastgrep` 和 `fastgrep-bench` 二进制 → `~/.local/bin/`
+2. 安装 Claude Code skill → `~/.claude/skills/fastgrep/SKILL.md`
 
 确保 `~/.local/bin` 在 `$PATH` 中。
 
@@ -190,10 +192,13 @@ fastgrep search "pattern" --auto-index false
 
 ## 作为 Claude Code Skill 使用
 
-### 安装 Skill
+运行 `bash install.sh` 时会自动安装 skill 到 `~/.claude/skills/fastgrep/SKILL.md`，之后在任何项目中都可以使用 `/fastgrep` 命令。
+
+如果只想安装 skill（不编译二进制）：
 
 ```bash
-cp skill/fastgrep.md ~/.claude/skills/
+mkdir -p ~/.claude/skills/fastgrep
+cp .claude/skills/fastgrep/SKILL.md ~/.claude/skills/fastgrep/
 ```
 
 安装后，Claude Code 在需要搜索大仓库时可以优先调用 `fastgrep search` 而非 `rg`。
@@ -290,8 +295,9 @@ fastgrep/
 │   │   ├── cmd/{index,search,status}.rs
 │   │   └── output.rs                 #   输出格式化
 │   └── fastgrep-bench/src/           # 压测工具
-├── skill/fastgrep.md                 # Claude Code Skill 定义
-└── scripts/install.sh                # 安装脚本
+├── install.sh                        # 一键安装入口
+├── scripts/install.sh                # 完整安装（编译 + skill）
+└── .claude/skills/fastgrep/SKILL.md  # Claude Code Skill 定义
 ```
 
 ## 依赖
