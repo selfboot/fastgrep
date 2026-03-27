@@ -53,6 +53,7 @@ fastgrep search "HashMap"
 ```bash
 fastgrep index                    # 索引当前目录
 fastgrep index --path /some/repo  # 索引指定目录
+fastgrep index --incremental      # 增量重建（仅重新处理变更文件）
 ```
 
 **输出示例：**
@@ -60,6 +61,13 @@ fastgrep index --path /some/repo  # 索引指定目录
 Building index for /data/home/user/linux...
 Index built: 74521 files, 389204 trigrams in 2341ms
 ```
+
+**增量重建**（`--incremental`）：
+- 检测上次构建以来的变更/新增/删除文件（通过 mtime 或 git）
+- 仅重新读取和提取变更文件的 trigram
+- 从旧 posting list + 新 trigram 重建完整索引
+- 变更超过 20% 时自动回退全量重建
+- 大目录速度显著提升（如 75 万文件：全量 6 分钟 → 增量数秒）
 
 **注意事项：**
 - 自动尊重 `.gitignore`，跳过 `.git/` 和 `.fastgrep/` 目录
@@ -169,8 +177,13 @@ Index status:
 
 1. **首次搜索**：无索引 → 自动构建
 2. **后续搜索**：索引存在 → 检查 HEAD commit 是否匹配
-3. **索引过期**：HEAD 已变化 → 自动重建
+3. **索引过期**：HEAD 已变化 → 增量重建（仅重新处理变更文件）
 4. **索引新鲜**：直接使用，零额外开销
+5. **Delta 积累过多**：变更文件超过 100 个 → 自动增量重建
+
+**新鲜度模型：**
+- **Git 仓库**：通过对比当前 HEAD commit 和索引中记录的 commit 判断。索引过期时触发增量重建（变更超 20% 自动回退全量）。索引新鲜但有未提交变更时，通过 delta 覆盖层搜索这些变更。
+- **非 Git 目录**：索引记录构建时间戳。搜索时检测 mtime 比构建时间戳新的文件，通过 delta 覆盖层搜索。当累积的 delta 文件超过 100 个时，自动触发增量重建将变更合并进主索引。
 
 ```bash
 # 不想自动建索引？手动管理：

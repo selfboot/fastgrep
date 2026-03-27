@@ -858,6 +858,85 @@ if let Some(delta) = delta {
 
 `SearchResult` includes a `delta_files` field that reports the number of files additionally searched via the delta layer.
 
+### 10.5 Incremental Index Rebuild
+
+For large directories (e.g., QQMail with 757k files, 6-minute full rebuild), full index reconstruction after every change is impractical. The incremental rebuild mechanism avoids re-reading unchanged files.
+
+#### 10.5.1 Core Principle
+
+Incremental rebuild ≠ in-place patching of on-disk files (posting list size changes would shift all offsets). Instead:
+
+```
+Load old index posting lists → remap file IDs → re-extract only changed files → merge → rewrite index
+```
+
+The key optimization: **skip reading 99%+ of file contents**. Only the changed/new files are read and re-processed.
+
+#### 10.5.2 Algorithm
+
+```
+incremental_rebuild(opts) → Result<Option<BuildStats>>:
+  1. Open old IndexReader, get build_timestamp
+  2. Detect changes:
+     - Git repo: changed_files_since(stored_commit)
+     - Non-git: detect_fs_changes(build_timestamp)
+  3. If no changes → return None
+  4. If change ratio > 20% → fall back to full build_index()
+  5. discover_files() → new file list, build path→new_id mapping
+  6. Build old_id→new_id mapping (skip deleted, mark modified)
+  7. Iterate all old lookup entries:
+     - Decode each posting list
+     - Remap old file IDs → new file IDs
+     - Skip deleted/modified files (modified will be re-extracted)
+     - Build new trigram_map
+  8. Parallel extract trigrams for changed/new files only (rayon)
+  9. Merge new trigrams into trigram_map
+  10. Remap to contiguous IDs, write_index()
+```
+
+#### 10.5.3 Trigger Mechanisms
+
+Two trigger paths:
+
+| Trigger | When | Source |
+|---------|------|--------|
+| **Manual** | `fastgrep index --incremental` | User invokes CLI |
+| **Auto (search-time)** | Delta files ≥ 100 | `build_delta_layer()` in `search.rs` |
+| **Auto (stale index)** | HEAD commit mismatch | `run()` in `search.rs` |
+
+Auto-trigger flow in `search.rs`:
+
+```rust
+// Stale index → incremental rebuild instead of full rebuild
+if auto_index && !git::is_index_fresh(root, reader.commit_hash()) {
+    incremental_rebuild(&opts)?;  // falls back to full rebuild on failure
+}
+
+// Delta too large → incremental rebuild
+if delta_count >= INCREMENTAL_REBUILD_THRESHOLD {
+    incremental_rebuild(&opts)?;
+}
+```
+
+#### 10.5.4 Safety Mechanisms
+
+| Condition | Action |
+|-----------|--------|
+| No changes detected | Return `None`, skip rebuild |
+| Change ratio > 20% | Fall back to full `build_index()` |
+| No `build_timestamp` in old index | Fall back to full `build_index()` |
+| Incremental rebuild fails | Fall back to full rebuild or continue with delta layer |
+
+#### 10.5.5 Performance
+
+For a 757k-file directory (QQMail):
+
+| Scenario | Full Rebuild | Incremental Rebuild |
+|----------|-------------|-------------------|
+| Time | ~6 minutes | Seconds (proportional to changed files) |
+| Files read | 757,000 | Only changed files |
+| Bottleneck | Reading all file contents | Directory stat walk + reading changed files |
+
 ---
 
 ## 11. Context Line Handling
@@ -1177,9 +1256,9 @@ With all files in page cache, rg scans 92k files in ~160ms. fastgrep's process s
 | Level | Count | Coverage |
 |------|------|---------|
 | Unit tests | 20 | Hash determinism, varint encode/decode, format serialization, trigram extraction, query decomposition, case-insensitive decomposition |
-| Integration tests | 10 | End-to-end build + search, regex, alternation, case sensitivity, file filtering, context lines, full scan fallback, delta layer added files, delta layer deleted file exclusion, non-git mtime delta detection |
+| Integration tests | 12 | End-to-end build + search, regex, alternation, case sensitivity, file filtering, context lines, full scan fallback, delta layer added files, delta layer deleted file exclusion, non-git mtime delta detection, incremental rebuild (add/modify/delete), incremental rebuild no-changes |
 | Correctness tests | 6 | 24 patterns against naive grep line-by-line comparison, no false negatives verification, case-insensitive accuracy, context line correctness, file type filter correctness, edge case patterns |
-| **Total** | **36** | |
+| **Total** | **38** | |
 
 ### 16.2 Key Test Cases
 
@@ -1279,7 +1358,7 @@ CSV raw data + Markdown report tables:
 ### Phase 3: Incremental Updates
 - [x] ~~Delta layer actually integrated into the search pipeline~~ ✅ Done: `execute_search` accepts `Option<&DeltaLayer>`, excludes deleted files, searches added/modified files
 - [x] ~~Non-git directory delta detection via filesystem mtime~~ ✅ Done: Records `build_timestamp` in `index.meta`, walks directory at search time to detect new/modified/deleted files
-- [ ] Incremental index updates (process only changed files, avoiding full rebuilds)
+- [x] ~~Incremental index updates (process only changed files, avoiding full rebuilds)~~ ✅ Done: `incremental_rebuild()` loads old posting lists, remaps file IDs, re-extracts only changed files, merges, rewrites index. Auto-triggered when delta exceeds threshold or index is stale. Manual via `fastgrep index --incremental`.
 
 ### Phase 4: Agent Deep Integration
 - [ ] MCP Server mode (persistent process, avoiding repeated mmap overhead)

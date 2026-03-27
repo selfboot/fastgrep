@@ -165,4 +165,23 @@ impl IndexReader {
     pub fn build_timestamp(&self) -> Option<u64> {
         self.meta.build_timestamp
     }
+
+    /// Get the total number of lookup entries (trigrams in the index).
+    pub fn entry_count(&self) -> usize {
+        self.entry_count
+    }
+
+    /// Read a lookup entry at the given index (public, for incremental rebuild).
+    pub fn get_lookup_entry(&self, index: usize) -> Option<LookupEntry> {
+        if index >= self.entry_count {
+            return None;
+        }
+        let data = &self.lookup_mmap[HEADER_SIZE..];
+        Some(self.read_lookup_entry(data, index))
+    }
+
+    /// Decode a posting list given offset and length (public, for incremental rebuild).
+    pub fn decode_posting_list(&self, offset: u32, len: u32) -> Vec<u32> {
+        self.read_posting_list(offset, len)
+    }
 }

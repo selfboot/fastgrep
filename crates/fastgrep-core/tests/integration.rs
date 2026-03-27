@@ -447,3 +447,121 @@ fn test_nondir_mtime_delta_detection() {
         deleted,
     );
 }
+
+#[test]
+fn test_incremental_rebuild() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_corpus(root);
+
+    // Full build
+    let opts = BuildOptions::new(root.to_path_buf());
+    builder::build_index(&opts).unwrap();
+
+    let reader = IndexReader::open(root).unwrap();
+    let _original_file_count = reader.file_count();
+
+    // Sleep so mtime of new file is strictly newer
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Add a new file
+    fs::write(
+        root.join("incremental_new.rs"),
+        "pub fn incremental_unique_token_xyz() {\n    println!(\"new!\");\n}\n",
+    )
+    .unwrap();
+
+    // Delete a file
+    fs::remove_file(root.join("notes.txt")).unwrap();
+
+    // Modify a file
+    fs::write(
+        root.join("hello.rs"),
+        "pub fn hello_modified_marker() {\n    println!(\"modified!\");\n}\n",
+    )
+    .unwrap();
+
+    // Run incremental rebuild
+    let result = builder::incremental_rebuild(&opts).unwrap();
+    assert!(result.is_some(), "should detect changes and rebuild");
+    let stats = result.unwrap();
+    assert!(stats.indexed_count > 0);
+
+    // Verify: search for new file content
+    let reader = IndexReader::open(root).unwrap();
+    let search_opts = SearchOptions {
+        pattern: "incremental_unique_token_xyz".to_string(),
+        root: root.to_path_buf(),
+        before_context: 0,
+        after_context: 0,
+        case_insensitive: false,
+        file_type: None,
+        glob: None,
+    };
+    let result = execute::execute_search(&reader, &search_opts, None).unwrap();
+    assert!(
+        !result.matches.is_empty(),
+        "new file should be found after incremental rebuild"
+    );
+
+    // Verify: deleted file content should not be found
+    let search_opts = SearchOptions {
+        pattern: "plain text file".to_string(),
+        root: root.to_path_buf(),
+        before_context: 0,
+        after_context: 0,
+        case_insensitive: false,
+        file_type: None,
+        glob: None,
+    };
+    let result = execute::execute_search(&reader, &search_opts, None).unwrap();
+    let has_notes = result.matches.iter().any(|m| m.file == "notes.txt");
+    assert!(!has_notes, "deleted file should not appear after incremental rebuild");
+
+    // Verify: modified file content should be found
+    let search_opts = SearchOptions {
+        pattern: "hello_modified_marker".to_string(),
+        root: root.to_path_buf(),
+        before_context: 0,
+        after_context: 0,
+        case_insensitive: false,
+        file_type: None,
+        glob: None,
+    };
+    let result = execute::execute_search(&reader, &search_opts, None).unwrap();
+    assert!(
+        !result.matches.is_empty(),
+        "modified file content should be found after incremental rebuild"
+    );
+
+    // Verify: old content of modified file should NOT be found
+    let search_opts = SearchOptions {
+        pattern: "Hello, world".to_string(),
+        root: root.to_path_buf(),
+        before_context: 0,
+        after_context: 0,
+        case_insensitive: false,
+        file_type: None,
+        glob: None,
+    };
+    let result = execute::execute_search(&reader, &search_opts, None).unwrap();
+    let has_hello_old = result.matches.iter().any(|m| m.file == "hello.rs");
+    assert!(!has_hello_old, "old content of modified file should not match");
+}
+
+#[test]
+fn test_incremental_rebuild_no_changes() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_corpus(root);
+
+    // Sleep so files have mtime strictly before build_timestamp
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let opts = BuildOptions::new(root.to_path_buf());
+    builder::build_index(&opts).unwrap();
+
+    // Incremental rebuild with no changes should return None
+    let result = builder::incremental_rebuild(&opts).unwrap();
+    assert!(result.is_none(), "should return None when no changes");
+}

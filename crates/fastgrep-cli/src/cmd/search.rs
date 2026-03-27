@@ -45,15 +45,17 @@ pub fn run(
 
     let reader = IndexReader::open(root).context("opening index")?;
 
-    // Check freshness: if HEAD commit changed, full rebuild
+    // Check freshness: if HEAD commit changed, incremental rebuild first
     if auto_index && !git::is_index_fresh(root, reader.commit_hash()) {
-        eprintln!("Index is stale, rebuilding...");
+        eprintln!("Index is stale, incrementally rebuilding...");
         let opts = BuildOptions::new(root.to_path_buf());
-        let stats = builder::build_index(&opts)?;
-        eprintln!(
-            "Index rebuilt: {} files indexed, {} trigrams in {}ms",
-            stats.indexed_count, stats.trigram_count, stats.build_time_ms,
-        );
+        match builder::incremental_rebuild(&opts) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[fastgrep] incremental rebuild failed ({}), full rebuild...", e);
+                builder::build_index(&opts)?;
+            }
+        }
         let reader = IndexReader::open(root).context("opening fresh index")?;
         // After rebuild, still check for uncommitted changes
         let delta = build_delta_layer(root, &reader);
@@ -62,6 +64,33 @@ pub fn run(
 
     // Index matches HEAD, but working tree may have uncommitted changes
     let delta = build_delta_layer(root, &reader);
+
+    // Auto incremental rebuild: if delta is too large, rebuild index instead
+    if auto_index {
+        if let Some(ref d) = delta {
+            let delta_count = d.modified_trigrams.len() + d.deleted_files.len();
+            if delta_count >= builder::INCREMENTAL_REBUILD_THRESHOLD {
+                eprintln!(
+                    "[fastgrep] {} delta files exceeds threshold ({}), incrementally rebuilding...",
+                    delta_count,
+                    builder::INCREMENTAL_REBUILD_THRESHOLD,
+                );
+                let opts = BuildOptions::new(root.to_path_buf());
+                match builder::incremental_rebuild(&opts) {
+                    Ok(_) => {
+                        // Reopen index after rebuild, search without delta
+                        let reader = IndexReader::open(root).context("opening rebuilt index")?;
+                        let delta = build_delta_layer(root, &reader);
+                        return do_search(&reader, root, pattern, before_context, after_context, case_insensitive, file_type, glob, output_format, delta.as_ref());
+                    }
+                    Err(e) => {
+                        eprintln!("[fastgrep] incremental rebuild failed ({}), using delta layer", e);
+                    }
+                }
+            }
+        }
+    }
+
     do_search(&reader, root, pattern, before_context, after_context, case_insensitive, file_type, glob, output_format, delta.as_ref())
 }
 

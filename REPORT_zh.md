@@ -856,6 +856,71 @@ if let Some(delta) = delta {
 
 `SearchResult` 中包含 `delta_files` 字段，报告通过 Delta 层额外搜索的文件数量。
 
+### 10.5 增量索引重建
+
+对于大目录（如 QQMail 75 万文件，全量重建需 6 分钟），每次变更后全量重建不现实。增量重建机制避免重新读取未变更的文件。
+
+#### 10.5.1 核心原理
+
+增量重建 ≠ 原地修改磁盘文件（posting list 变长后 offset 全变，无法 patch）。实际做法：
+
+```
+加载旧索引 posting list → 重映射 file ID → 仅对变更文件重新提取 trigram → 合并 → 重写索引
+```
+
+核心优化：**跳过读取 99%+ 的文件内容**。仅读取变更/新增的文件。
+
+#### 10.5.2 算法流程
+
+```
+incremental_rebuild(opts) → Result<Option<BuildStats>>:
+  1. 打开旧 IndexReader，获取 build_timestamp
+  2. 检测变更：
+     - Git 仓库：changed_files_since(stored_commit)
+     - 非 Git：detect_fs_changes(build_timestamp)
+  3. 无变更 → 返回 None
+  4. 变更比例 > 20% → 回退全量 build_index()
+  5. discover_files() → 新文件列表，构建 path→new_id 映射
+  6. 构建 old_id→new_id 映射（跳过 deleted，标记 modified）
+  7. 遍历旧 lookup 表所有 entry：
+     - 解码每个 posting list
+     - 将旧 file_id 映射为新 file_id
+     - 跳过 deleted/modified 文件（modified 会重新提取）
+     - 构建新 trigram_map
+  8. 仅对变更/新增文件并行提取 trigram（rayon）
+  9. 合并新 trigram 到 trigram_map
+  10. 重映射为连续 ID，write_index()
+```
+
+#### 10.5.3 触发机制
+
+两种触发路径：
+
+| 触发方式 | 时机 | 来源 |
+|---------|------|------|
+| **手动** | `fastgrep index --incremental` | 用户命令行调用 |
+| **自动（搜索时）** | Delta 文件 ≥ 100 个 | `search.rs` 中 `build_delta_layer()` |
+| **自动（索引过期）** | HEAD commit 不匹配 | `search.rs` 中 `run()` |
+
+#### 10.5.4 安全机制
+
+| 条件 | 行为 |
+|------|------|
+| 无变更 | 返回 `None`，跳过重建 |
+| 变更比例 > 20% | 回退全量 `build_index()` |
+| 旧索引无 `build_timestamp` | 回退全量 `build_index()` |
+| 增量重建失败 | 回退全量重建或继续使用 delta 层 |
+
+#### 10.5.5 性能
+
+以 75 万文件目录（QQMail）为例：
+
+| 场景 | 全量重建 | 增量重建 |
+|------|---------|---------|
+| 耗时 | ~6 分钟 | 数秒（与变更文件数成正比） |
+| 读取文件 | 757,000 个 | 仅变更文件 |
+| 瓶颈 | 读取所有文件内容 | 目录 stat 遍历 + 读取变更文件 |
+
 ---
 
 ## 11. 上下文行处理
@@ -1127,9 +1192,9 @@ fn read_lookup_entry(&self, data: &[u8], index: usize) -> LookupEntry {
 | 层级 | 数量 | 覆盖范围 |
 |------|------|---------|
 | 单元测试 | 20 | 哈希确定性、varint 编解码、格式序列化、trigram 提取、查询分解、大小写不敏感分解 |
-| 集成测试 | 10 | 端到端构建+搜索、正则、alternation、大小写、文件过滤、上下文行、全扫描回退、Delta 层新增文件、Delta 层删除文件排除、非 Git 目录 mtime Delta 检测 |
+| 集成测试 | 12 | 端到端构建+搜索、正则、alternation、大小写、文件过滤、上下文行、全扫描回退、Delta 层新增文件、Delta 层删除文件排除、非 Git 目录 mtime Delta 检测、增量重建（增/改/删）、增量重建无变更 |
 | 正确性测试 | 6 | 24 种模式逐行对比 naive grep、无漏匹配验证、大小写不敏感准确性、上下文行正确性、文件类型过滤正确性、边界情况 |
-| **合计** | **36** | |
+| **合计** | **38** | |
 
 ### 16.2 关键测试用例
 
@@ -1229,7 +1294,7 @@ CSV 原始数据 + Markdown 报告表格：
 ### Phase 3: 增量更新
 - [x] ~~Delta 层实际集成到搜索管线~~ ✅ 已完成：`execute_search` 接受 `Option<&DeltaLayer>`，排除删除文件、搜索新增/修改文件
 - [x] ~~非 Git 目录基于文件系统 mtime 的 Delta 检测~~ ✅ 已完成：在 `index.meta` 中记录 `build_timestamp`，搜索时遍历目录检测新增/修改/删除文件
-- [ ] 增量索引更新（仅处理变更文件，避免全量重建）
+- [x] ~~增量索引更新（仅处理变更文件，避免全量重建）~~ ✅ 已完成：`incremental_rebuild()` 加载旧 posting list、重映射 file ID、仅对变更文件重新提取 trigram、合并后重写索引。Delta 超阈值或索引过期时自动触发，也可通过 `fastgrep index --incremental` 手动触发。
 
 ### Phase 4: Agent 深度集成
 - [ ] MCP Server 模式（常驻进程，避免重复 mmap 开销）

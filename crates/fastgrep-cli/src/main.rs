@@ -17,6 +17,10 @@ enum Commands {
         /// Path to index (defaults to current directory)
         #[arg(short, long)]
         path: Option<String>,
+
+        /// Incremental rebuild: only re-process changed files
+        #[arg(long)]
+        incremental: bool,
     },
 
     /// Search using the trigram index
@@ -73,9 +77,9 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Index { path } => {
+        Commands::Index { path, incremental } => {
             let root = resolve_path(path)?;
-            cmd::index::run(&root)
+            cmd::index::run(&root, incremental)
         }
         Commands::Search {
             pattern,

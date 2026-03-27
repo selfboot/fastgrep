@@ -53,6 +53,7 @@ Scans all files under a directory, extracts trigrams, and writes the index to th
 ```bash
 fastgrep index                    # Index the current directory
 fastgrep index --path /some/repo  # Index a specific directory
+fastgrep index --incremental      # Incremental rebuild (only re-process changed files)
 ```
 
 **Example output:**
@@ -60,6 +61,13 @@ fastgrep index --path /some/repo  # Index a specific directory
 Building index for /data/home/user/linux...
 Index built: 74521 files, 389204 trigrams in 2341ms
 ```
+
+**Incremental rebuild** (`--incremental`):
+- Detects changed/new/deleted files since the last build (via mtime or git)
+- Only re-reads and re-extracts trigrams for changed files
+- Rebuilds the full index from old postings + new trigrams
+- Falls back to full rebuild if >20% of files changed
+- Dramatically faster for large directories (e.g., 757k files: 6 min full → seconds incremental)
 
 **Notes:**
 - Automatically respects `.gitignore`; skips `.git/` and `.fastgrep/` directories
@@ -170,12 +178,13 @@ Default behavior (auto-index enabled; disable with `--no-auto-index`):
 
 1. **First search**: no index exists → build automatically
 2. **Subsequent searches**: index exists → check freshness
-3. **Stale index**: HEAD has changed → rebuild automatically
+3. **Stale index**: HEAD has changed → incremental rebuild (only re-process changed files)
 4. **Fresh index**: use as-is, zero overhead
+5. **Delta accumulation**: when delta files exceed 100 → auto incremental rebuild
 
 **Freshness model:**
-- **Git repositories**: freshness is determined by comparing the current HEAD commit hash against the one stored in the index. When the index is fresh but there are uncommitted changes, a delta overlay layer is applied to cover those changes.
-- **Non-git directories**: the index records a build timestamp. At search time, files with mtime newer than the build timestamp are detected and searched via a delta overlay layer. Deleted files are also detected and excluded from results.
+- **Git repositories**: freshness is determined by comparing the current HEAD commit hash against the one stored in the index. When the index is stale, an incremental rebuild is triggered (falls back to full rebuild if >20% changed). When the index is fresh but there are uncommitted changes, a delta overlay layer is applied to cover those changes.
+- **Non-git directories**: the index records a build timestamp. At search time, files with mtime newer than the build timestamp are detected and searched via a delta overlay layer. When accumulated delta files exceed 100, an incremental rebuild is automatically triggered to merge changes into the main index.
 
 ```bash
 # Don't want automatic indexing? Manage it manually:
