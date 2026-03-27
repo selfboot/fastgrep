@@ -137,12 +137,16 @@ pub fn build_index(opts: &BuildOptions) -> Result<BuildStats> {
     let indexed_count = indexed_files.len();
     eprintln!(" {} trigrams from {} files", trigram_count, indexed_count);
 
-    // 4. Get current commit hash
+    // 4. Get current commit hash and build timestamp
     let commit_hash = git::get_head_commit(root).ok();
+    let build_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .ok();
 
     // 5. Write to disk
     eprint!("  Writing index...");
-    writer::write_index(&trigram_map, &indexed_files, root, commit_hash)?;
+    writer::write_index(&trigram_map, &indexed_files, root, commit_hash, build_timestamp)?;
     eprintln!(" done");
 
     let build_time_ms = start.elapsed().as_millis();

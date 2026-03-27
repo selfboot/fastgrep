@@ -379,3 +379,71 @@ fn test_delta_layer_excludes_deleted_file() {
     let has_notes = result.matches.iter().any(|m| m.file == "notes.txt");
     assert!(!has_notes, "notes.txt should be excluded with delta layer");
 }
+
+#[test]
+fn test_nondir_mtime_delta_detection() {
+    use fastgrep_core::git;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    create_test_corpus(root);
+
+    // Build index (this is a non-git tmpdir)
+    let opts = BuildOptions::new(root.to_path_buf());
+    builder::build_index(&opts).unwrap();
+
+    let reader = IndexReader::open(root).unwrap();
+
+    // Verify build_timestamp was recorded
+    let build_ts = reader.build_timestamp();
+    assert!(build_ts.is_some(), "build_timestamp should be recorded");
+
+    // Sleep briefly so new file has a strictly newer mtime
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Add a new file after index was built
+    fs::write(
+        root.join("delta_test.rs"),
+        "pub fn mtime_delta_unique_marker() {\n    println!(\"detected!\");\n}\n",
+    )
+    .unwrap();
+
+    // detect_fs_changes should find the new file
+    let (modified, deleted) =
+        git::detect_fs_changes(root, &reader.meta.files, build_ts.unwrap()).unwrap();
+    assert!(
+        modified.contains(&"delta_test.rs".to_string()),
+        "new file should be detected as modified: {:?}",
+        modified,
+    );
+    assert!(deleted.is_empty(), "no files should be deleted");
+
+    // Build a delta layer and verify search finds the new content
+    use fastgrep_core::index::delta::DeltaLayer;
+    let delta = DeltaLayer::from_changed_files(root, &modified, &deleted).unwrap();
+    let search_opts = SearchOptions {
+        pattern: "mtime_delta_unique_marker".to_string(),
+        root: root.to_path_buf(),
+        before_context: 0,
+        after_context: 0,
+        case_insensitive: false,
+        file_type: None,
+        glob: None,
+    };
+    let result = execute::execute_search(&reader, &search_opts, Some(&delta)).unwrap();
+    assert!(
+        !result.matches.is_empty(),
+        "should find new file via mtime delta",
+    );
+    assert_eq!(result.matches[0].file, "delta_test.rs");
+
+    // Also test deletion detection
+    fs::remove_file(root.join("notes.txt")).unwrap();
+    let (_, deleted) =
+        git::detect_fs_changes(root, &reader.meta.files, build_ts.unwrap()).unwrap();
+    assert!(
+        deleted.contains(&"notes.txt".to_string()),
+        "deleted file should be detected: {:?}",
+        deleted,
+    );
+}

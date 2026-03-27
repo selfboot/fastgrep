@@ -160,4 +160,9 @@ impl IndexReader {
     pub fn commit_hash(&self) -> Option<&str> {
         self.meta.commit_hash.as_deref()
     }
+
+    /// Get the build timestamp (epoch seconds).
+    pub fn build_timestamp(&self) -> Option<u64> {
+        self.meta.build_timestamp
+    }
 }

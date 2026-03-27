@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
+# One-line install for fastgrep as a Claude Code skill:
+#
+#   git clone https://github.com/user/fastgrep && cd fastgrep && bash install.sh
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Support being called from project root (install.sh) or scripts/ (scripts/install.sh)
+if [[ -f "$SCRIPT_DIR/Cargo.toml" ]]; then
+    PROJECT_ROOT="$SCRIPT_DIR"
+else
+    PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 
-# Source cargo env if not already in PATH
+# --- 1. Build binary ---
 if ! command -v cargo &>/dev/null; then
     if [[ -f "$HOME/.cargo/env" ]]; then
         source "$HOME/.cargo/env"
@@ -14,32 +23,33 @@ if ! command -v cargo &>/dev/null; then
     fi
 fi
 
-echo "Building fastgrep..."
+echo "==> Building fastgrep..."
 cd "$PROJECT_ROOT"
 cargo build --release -p fastgrep-cli -p fastgrep-bench
 
-# Install binaries (remove first to handle "Text file busy")
+# --- 2. Install binaries ---
 INSTALL_DIR="${HOME}/.local/bin"
 mkdir -p "$INSTALL_DIR"
 rm -f "$INSTALL_DIR/fastgrep" "$INSTALL_DIR/fastgrep-bench"
 cp target/release/fastgrep "$INSTALL_DIR/"
 cp target/release/fastgrep-bench "$INSTALL_DIR/"
-echo "Installed fastgrep to $INSTALL_DIR/fastgrep"
-echo "Installed fastgrep-bench to $INSTALL_DIR/fastgrep-bench"
+echo "    Installed fastgrep       -> $INSTALL_DIR/fastgrep"
+echo "    Installed fastgrep-bench -> $INSTALL_DIR/fastgrep-bench"
 
-# Install skill
-SKILL_DIR="${HOME}/.claude/skills"
+# --- 3. Install Claude Code skill ---
+SKILL_DIR="${HOME}/.claude/skills/fastgrep"
 mkdir -p "$SKILL_DIR"
-cp skill/fastgrep.md "$SKILL_DIR/"
-echo "Installed skill to $SKILL_DIR/fastgrep.md"
+cp "$PROJECT_ROOT/.claude/skills/fastgrep/SKILL.md" "$SKILL_DIR/SKILL.md"
+echo "    Installed skill           -> $SKILL_DIR/SKILL.md"
 
-# Check PATH
+# --- 4. PATH check ---
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     echo ""
     echo "WARNING: $INSTALL_DIR is not in your PATH."
     echo "Add this to your shell profile:"
-    echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
 echo ""
-echo "Done! Run 'fastgrep --help' to get started."
+echo "Done! Claude Code can now use /fastgrep in any project."
+echo "Run 'fastgrep --help' to verify."

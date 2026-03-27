@@ -117,6 +117,10 @@ pub struct IndexMeta {
     pub file_count: u32,
     pub trigram_count: u32,
     pub commit_hash: Option<String>,
+    /// Epoch seconds when the index was built. Used for mtime-based delta detection
+    /// in non-git directories. `None` for backward compatibility with older indexes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_timestamp: Option<u64>,
     /// Ordered list of file paths in the index. Index position = file ID.
     pub files: Vec<String>,
 }

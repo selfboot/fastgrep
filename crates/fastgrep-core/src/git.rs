@@ -1,6 +1,8 @@
 /// Git integration: HEAD commit detection and change tracking.
 
+use std::collections::HashSet;
 use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
@@ -88,7 +90,69 @@ pub fn working_tree_changes(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     Ok((modified, deleted))
 }
 
-/// Get a list of files changed since a given commit hash.
+/// Detect filesystem changes in a non-git directory by comparing file mtimes
+/// against the index build timestamp.
+///
+/// Returns (modified_or_new, deleted) paths relative to root.
+/// - Files with mtime > build_timestamp are considered modified/new.
+/// - Files present in `indexed_files` but absent from disk are considered deleted.
+pub fn detect_fs_changes(
+    root: &Path,
+    indexed_files: &[String],
+    build_timestamp: u64,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let build_time = UNIX_EPOCH + Duration::from_secs(build_timestamp);
+
+    // Walk the directory to find new/modified files
+    let mut modified = Vec::new();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            name != ".fastgrep" && name != ".git"
+        })
+        .build();
+
+    // Collect current files on disk for deletion detection
+    let mut current_files: HashSet<String> = HashSet::new();
+
+    for result in walker {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(root) {
+            Ok(r) => r.to_string_lossy().into_owned(),
+            Err(_) => continue,
+        };
+
+        current_files.insert(rel.clone());
+
+        // Check mtime
+        if let Ok(metadata) = entry.metadata() {
+            if let Ok(mtime) = metadata.modified() {
+                if mtime > build_time {
+                    modified.push(rel);
+                }
+            }
+        }
+    }
+
+    // Find deleted files: in index but not on disk
+    let deleted: Vec<String> = indexed_files
+        .iter()
+        .filter(|f| !current_files.contains(f.as_str()))
+        .cloned()
+        .collect();
+
+    Ok((modified, deleted))
+}
 /// Returns (modified_or_added, deleted) paths relative to root.
 pub fn changed_files_since(root: &Path, since_commit: &str) -> Result<(Vec<String>, Vec<String>)> {
     // Use git diff-index to find changes

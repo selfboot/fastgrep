@@ -22,6 +22,7 @@ pub fn write_index(
     files: &[String],
     root: &Path,
     commit_hash: Option<String>,
+    build_timestamp: Option<u64>,
 ) -> Result<()> {
     let index_dir = root.join(INDEX_DIR);
     fs::create_dir_all(&index_dir).context("creating index directory")?;
@@ -74,6 +75,7 @@ pub fn write_index(
         file_count: files.len() as u32,
         trigram_count: lookup_entries.len() as u32,
         commit_hash,
+        build_timestamp,
         files: files.to_vec(),
     };
     let meta_json = serde_json::to_string_pretty(&meta)?;

@@ -1,6 +1,7 @@
 ---
 name: fastgrep
-description: Fast regex search with trigram indexing — 10-70x faster than ripgrep on large codebases
+description: Fast regex search with trigram indexing — 10-70x faster than ripgrep on large codebases. Use when searching for patterns in large directories (>10k files) where rg is too slow.
+allowed-tools: Bash
 ---
 
 # fastgrep — Fast Regex Search

@@ -56,38 +56,57 @@ pub fn run(
         );
         let reader = IndexReader::open(root).context("opening fresh index")?;
         // After rebuild, still check for uncommitted changes
-        let delta = build_delta_layer(root);
+        let delta = build_delta_layer(root, &reader);
         return do_search(&reader, root, pattern, before_context, after_context, case_insensitive, file_type, glob, output_format, delta.as_ref());
     }
 
     // Index matches HEAD, but working tree may have uncommitted changes
-    let delta = build_delta_layer(root);
+    let delta = build_delta_layer(root, &reader);
     do_search(&reader, root, pattern, before_context, after_context, case_insensitive, file_type, glob, output_format, delta.as_ref())
 }
 
-/// Build a delta layer from uncommitted working tree changes.
-/// Returns None if not a git repo, no changes, or detection fails.
-fn build_delta_layer(root: &Path) -> Option<DeltaLayer> {
-    if !git::is_git_repo(root) {
-        return None;
+/// Build a delta layer from uncommitted working tree changes (git) or
+/// mtime-based filesystem changes (non-git).
+/// Returns None if no changes detected or detection fails.
+fn build_delta_layer(root: &Path, reader: &IndexReader) -> Option<DeltaLayer> {
+    if git::is_git_repo(root) {
+        // Git repo: use git status for delta detection
+        if !git::has_working_tree_changes(root) {
+            return None;
+        }
+        let (modified, deleted) = git::working_tree_changes(root).ok()?;
+        if modified.is_empty() && deleted.is_empty() {
+            return None;
+        }
+        let delta = DeltaLayer::from_changed_files(root, &modified, &deleted).ok()?;
+        if delta.is_empty() {
+            return None;
+        }
+        eprintln!(
+            "[fastgrep] delta: {} modified, {} deleted uncommitted files",
+            delta.modified_trigrams.len(),
+            delta.deleted_files.len(),
+        );
+        Some(delta)
+    } else {
+        // Non-git directory: use mtime-based delta detection
+        let build_ts = reader.build_timestamp()?;
+        let (modified, deleted) =
+            git::detect_fs_changes(root, &reader.meta.files, build_ts).ok()?;
+        if modified.is_empty() && deleted.is_empty() {
+            return None;
+        }
+        let delta = DeltaLayer::from_changed_files(root, &modified, &deleted).ok()?;
+        if delta.is_empty() {
+            return None;
+        }
+        eprintln!(
+            "[fastgrep] delta: {} modified, {} deleted files (mtime-based)",
+            delta.modified_trigrams.len(),
+            delta.deleted_files.len(),
+        );
+        Some(delta)
     }
-    if !git::has_working_tree_changes(root) {
-        return None;
-    }
-    let (modified, deleted) = git::working_tree_changes(root).ok()?;
-    if modified.is_empty() && deleted.is_empty() {
-        return None;
-    }
-    let delta = DeltaLayer::from_changed_files(root, &modified, &deleted).ok()?;
-    if delta.is_empty() {
-        return None;
-    }
-    eprintln!(
-        "[fastgrep] delta: {} modified, {} deleted uncommitted files",
-        delta.modified_trigrams.len(),
-        delta.deleted_files.len(),
-    );
-    Some(delta)
 }
 
 fn do_search(
